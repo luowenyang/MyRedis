@@ -43,12 +43,20 @@ type GodisDB struct {
 }
 
 type GodisServer struct {
-	fd      int
-	port    int
-	db      *GodisDB
-	clients map[int]*GodisClient
-	aeLoop  *AeLoop
-	dirty   int64
+	fd             int
+	port           int
+	db             *GodisDB
+	clients        map[int]*GodisClient
+	aeLoop         *AeLoop
+	dirty          int64
+	bgsavechildpid int
+	appendonly     int
+	lastfsync      int64
+	appendfd       *os.File
+	appendfilename string
+	lastsave       int64
+	saveparams     *saveparam
+	saveparamslen  int
 }
 
 type GodisClient struct {
@@ -130,7 +138,7 @@ var cmdTable = []GodisCommand{
 func hdelCommand(c *GodisClient) {
 	key := c.args[1]
 	deleted := 0
-	// keyremoved := 0
+	//keyremoved := 0
 	hashObej := lookupKeyWrite(key)
 	if hashObej == nil {
 		c.AddReplyInt8(0)
@@ -542,6 +550,10 @@ func bgsaveCommand(c *GodisClient) {
 }
 
 func saveCommand(c *GodisClient) {
+	if server.bgsavechildpid != -1 {
+		c.AddReplyError("Background save already in progress")
+		return
+	}
 
 }
 

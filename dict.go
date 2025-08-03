@@ -98,18 +98,6 @@ func (dict *Dict) expand(size int64) error {
 	dict.rehashidx = 0
 	return nil
 }
-
-/*
-func nextPower(size int64) int64 {
-	for i := INIT_SIZE; i < math.MaxInt64; i *= 2 {
-		if i >= size {
-			return i
-		}
-	}
-	return -1
-}
-*/
-
 func nextPower(size int64) int64 {
 	newSize := size << 1
 	if newSize < size {
