@@ -110,6 +110,11 @@ var cmdTable = []GodisCommand{
 
 	// hash
 	{"hset", hsetCommand, -4},
+	{"hsetnx", hsetnxCommand, -4},
+	{"hkeys", hkeysCommand, 2},
+	{"hvals", hvalsCommand, 2},
+	{"hget", hgetCommand, 3},
+	{"hdel", hdelCommand, 3},
 
 	//zset
 
@@ -119,19 +124,70 @@ var cmdTable = []GodisCommand{
 	{"bgrewriteaof", bgrewriteaofCommand, 1},
 }
 
-func hsetCommand(c *GodisClient) {
-	var update int
+func hdelCommand(c *GodisClient) {
+
+}
+
+func hvalsCommand(c *GodisClient) {
+
+}
+
+func hkeysCommand(c *GodisClient) {
+
+}
+
+func hsetnxCommand(c *GodisClient) {
+
+}
+
+func hgetCommand(c *GodisClient) {
 	key := c.args[1]
-	hash := lookupKeyWrite(key)
-	if hash == nil {
-		hash = hashTypeCreate()
-		server.db.data.Set(key, hash)
-	} else if hash.Type_ != GHASH {
+	field := c.args[2]
+
+	// 查找哈希对象
+	hashObj := lookupKeyWrite(key)
+	if hashObj == nil {
+		c.AddReplyInt8(-1)
+		return
+	}
+
+	if hashObj.Type_ != GHASH {
 		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
 		return
 	}
-	update = hash.hashTypeSet(hash, c.args[2:])
-	c.AddReplyInt(update)
+
+	// 从哈希表中获取值
+	val := hashObj.hashTypeGet(field)
+	if val == nil {
+		c.AddReplyInt8(-1)
+		return
+	}
+	// 返回找到的值
+	str := val.StrVal()
+	c.AddReplyStr(fmt.Sprintf("$%d\r\n%s\r\n", len(str), str))
+}
+
+func hsetCommand(c *GodisClient) {
+	if len(c.args)%2 != 0 {
+		c.AddReplyError("wrong number of arguments for HMSET")
+		return
+	}
+
+	key := c.args[1]
+	hashObj := lookupKeyWrite(key)
+
+	// 如果键不存在，创建一个新的哈希表
+	if hashObj == nil {
+		hashObj = hashTypeCreate()
+		server.db.data.Set(key, hashObj)
+		hashObj.DecrRefCount() // Set 会增加引用计数，所以这里减少一次
+	} else if hashObj.Type_ != GHASH {
+		// 如果键存在但不是哈希类型，返回错误
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	updated := hashObj.hashTypeSet(c.args[2:])
+	c.AddReplyInt(updated)
 }
 
 func scardCommand(c *GodisClient) {

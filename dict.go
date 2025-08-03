@@ -234,7 +234,6 @@ func (dict *Dict) Set(key, val *Gobj) {
 	entry.Value.DecrRefCount()
 	entry.Value = val
 	val.IncrRefCount()
-
 }
 func (dict *Dict) Get(key *Gobj) *Gobj {
 	entry := dict.Find(key)
