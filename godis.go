@@ -153,7 +153,8 @@ func hsetnxCommand(c *GodisClient) {
 	}
 	field := c.args[2]
 	if hashObj.hashTypeExists(field, &isHashDeleted) {
-
+		c.AddReplyInt8(0)
+		return
 	}
 
 	// Field expired and in turn hash deleted. Create new one!
