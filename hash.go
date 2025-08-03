@@ -1,5 +1,7 @@
 package main
 
+import "log"
+
 func hashTypeCreate() *Gobj {
 	return CreateHashObject()
 }
@@ -40,5 +42,23 @@ func (hash *Gobj) hashTypeGet(field *Gobj) *Gobj {
 }
 
 func (hash *Gobj) hashTypeExists(field *Gobj, isHashDeleted *bool) bool {
-	return true
+	hashDict := hash.Val_.(*Dict)
+	entry := hashDict.Find(field)
+	// TODO isHashDeleted
+	return entry != nil
+}
+
+func (hash *Gobj) hashTypeDelete(fields []*Gobj) int {
+	deleted := 0
+	hashDict := hash.Val_.(*Dict)
+	for i := 0; i < len(fields); i++ {
+		hashDict.Delete(fields[i])
+		deleted++
+	}
+	// TODO bug 没有正确计算用了的个数
+	if hashDict.usedSize() == 0 {
+		server.db.data.Delete(hash)
+	}
+	log.Default().Printf("hashTypeDelete deleted %d fields", hashDict.usedSize())
+	return deleted
 }

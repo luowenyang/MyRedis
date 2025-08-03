@@ -111,11 +111,13 @@ var cmdTable = []GodisCommand{
 
 	// hash
 	{"hset", hsetCommand, -4},
-	{"hsetnx", hsetnxCommand, -4},
+	{"hsetnx", hsetnxCommand, 4},
+	// TODO
 	{"hkeys", hkeysCommand, 2},
 	{"hvals", hvalsCommand, 2},
+
 	{"hget", hgetCommand, 3},
-	{"hdel", hdelCommand, 3},
+	{"hdel", hdelCommand, -3},
 
 	//zset
 
@@ -126,7 +128,26 @@ var cmdTable = []GodisCommand{
 }
 
 func hdelCommand(c *GodisClient) {
-
+	key := c.args[1]
+	deleted := 0
+	// keyremoved := 0
+	hashObej := lookupKeyWrite(key)
+	if hashObej == nil {
+		c.AddReplyInt8(0)
+		return
+	} else if hashObej.Type_ != GHASH {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	// TODO
+	/* Hash field expiration is optimized to avoid frequent update global HFE DS for
+	 * each field deletion. Eventually active-expiration will run and update or remove
+	 * the hash from global HFE DS gracefully. Nevertheless, statistic "subexpiry"
+	 * might reflect wrong number of hashes with HFE to the user if it is the last
+	 * field with expiration. The following logic checks if this is indeed the last
+	 * field with expiration and removes it from global HFE DS. */
+	deleted = hashObej.hashTypeDelete(c.args[2:])
+	c.AddReplyInt(deleted)
 }
 
 func hvalsCommand(c *GodisClient) {
@@ -138,8 +159,12 @@ func hkeysCommand(c *GodisClient) {
 }
 
 func hsetnxCommand(c *GodisClient) {
-	var isHashDeleted bool
 	key := c.args[1]
+	field := c.args[2]
+	value := c.args[3]
+
+	var isHashDeleted bool
+
 	hashObj := lookupKeyWrite(key)
 	if hashObj == nil {
 		hashObj = hashTypeCreate()
@@ -151,7 +176,6 @@ func hsetnxCommand(c *GodisClient) {
 		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
 		return
 	}
-	field := c.args[2]
 	if hashObj.hashTypeExists(field, &isHashDeleted) {
 		c.AddReplyInt8(0)
 		return
@@ -165,6 +189,8 @@ func hsetnxCommand(c *GodisClient) {
 			return
 		}
 	}
+	hashObj.hashTypeSet([]*Gobj{field, value})
+	c.AddReplyInt8(1)
 }
 
 func hgetCommand(c *GodisClient) {
