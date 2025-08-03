@@ -48,6 +48,7 @@ type GodisServer struct {
 	db      *GodisDB
 	clients map[int]*GodisClient
 	aeLoop  *AeLoop
+	dirty   int64
 }
 
 type GodisClient struct {
@@ -137,7 +138,32 @@ func hkeysCommand(c *GodisClient) {
 }
 
 func hsetnxCommand(c *GodisClient) {
+	var isHashDeleted bool
+	key := c.args[1]
+	hashObj := lookupKeyWrite(key)
+	if hashObj == nil {
+		hashObj = hashTypeCreate()
+		err := server.db.data.Add(key, hashObj)
+		if err != nil {
+			return
+		}
+	} else if hashObj.Type_ != GHASH {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	field := c.args[2]
+	if hashObj.hashTypeExists(field, &isHashDeleted) {
 
+	}
+
+	// Field expired and in turn hash deleted. Create new one!
+	if isHashDeleted {
+		hashObj = hashTypeCreate()
+		err := server.db.data.Add(key, hashObj)
+		if err != nil {
+			return
+		}
+	}
 }
 
 func hgetCommand(c *GodisClient) {
@@ -243,8 +269,10 @@ func saddCommand(c *GodisClient) {
 	// 如果键不存在，创建一个新的集合
 	if set == nil {
 		set = SetTypeCreate()
-		server.db.data.Set(key, set)
-		set.DecrRefCount() // SetKey 会增加引用计数，所以这里减少一次
+		err := server.db.data.Add(key, set)
+		if err != nil {
+			return
+		}
 	} else if set.Type_ != GSET {
 		// 如果键存在但不是集合类型，返回错误
 		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")

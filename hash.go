@@ -38,3 +38,7 @@ func (hash *Gobj) hashTypeGet(field *Gobj) *Gobj {
 	}
 	return nil
 }
+
+func (hash *Gobj) hashTypeExists(field *Gobj, isHashDeleted *bool) bool {
+	return false
+}
