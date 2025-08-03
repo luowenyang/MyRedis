@@ -5,7 +5,7 @@ func hashTypeCreate() *Gobj {
 }
 
 func (hash *Gobj) hashTypeSet(values []*Gobj) int {
-	updated := 0
+	created := 0
 	hashDict := hash.Val_.(*Dict)
 	// 处理字段和值的配对
 	for i := 0; i < len(values); i += 2 {
@@ -16,7 +16,7 @@ func (hash *Gobj) hashTypeSet(values []*Gobj) int {
 		err := hashDict.Add(field, value)
 		if err == nil {
 			// 添加成功，说明是新字段
-			updated++
+			created++
 		} else {
 			// 字段已存在，更新值
 			entry := hashDict.Find(field)
@@ -27,7 +27,7 @@ func (hash *Gobj) hashTypeSet(values []*Gobj) int {
 			}
 		}
 	}
-	return updated
+	return created
 }
 
 func (hash *Gobj) hashTypeGet(field *Gobj) *Gobj {

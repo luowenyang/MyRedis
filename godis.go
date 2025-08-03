@@ -186,8 +186,8 @@ func hsetCommand(c *GodisClient) {
 		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
 		return
 	}
-	updated := hashObj.hashTypeSet(c.args[2:])
-	c.AddReplyInt(updated)
+	created := hashObj.hashTypeSet(c.args[2:])
+	c.AddReplyInt(created)
 }
 
 func scardCommand(c *GodisClient) {
@@ -748,13 +748,9 @@ func ProcessCommand(c *GodisClient) {
 		SendReplyToClient(server.aeLoop, c.fd, c)
 		resetClient(c)
 		return
-	} else if cmd.arity > 0 && cmd.arity != len(c.args) {
-		c.AddReplyError("wrong number of args")
-		SendReplyToClient(server.aeLoop, c.fd, c)
-		resetClient(c)
-		return
-	} else if cmd.arity < 0 && -cmd.arity > len(c.args) {
-		c.AddReplyError("wrong number of args")
+	} else if (cmd.arity > 0 && cmd.arity != len(c.args)) ||
+		(cmd.arity < 0 && -cmd.arity > len(c.args)) {
+		c.AddReplyError(fmt.Sprintf("wrong number of arguments for '%s' command", cmd.name))
 		SendReplyToClient(server.aeLoop, c.fd, c)
 		resetClient(c)
 		return
