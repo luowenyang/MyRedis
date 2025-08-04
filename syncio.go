@@ -35,3 +35,11 @@ func fwriteBulkObject(fp *os.File, o *Gobj) int8 {
 	}
 	return GODIS_ERR
 }
+func fwriteBulkCount(fp *os.File, char byte, count int64) int8 {
+	s := fmt.Sprintf("%c%v\r\n", char, count)
+	if _, err := fp.WriteString(s); err != nil {
+		log.Printf("Error writing bulk count to file: %v\n", err)
+		return GODIS_ERR
+	}
+	return GODIS_OK
+}

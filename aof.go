@@ -13,6 +13,10 @@ func stopAppendOnly() {
 	server.appendonly = 0
 }
 
+const (
+	AOF_REWRITE_ITEMS_PER_CMD = 64
+)
+
 func flushAppendOnlyFile() {
 	if len(server.aofbuf) == 0 {
 		return
@@ -104,7 +108,6 @@ func rewriteAppendOnlyFile() int8 {
 				log.Printf("Failed writing to the temporary AOF file: %v\n", err)
 			}
 		} else if value.Type_ == GSET {
-			cmd := "*3\r\n$4\r\nSADD\r\n"
 			if value.encoding == GODIS_ENCODING_INTSET {
 				/* Emit the SADDs needed to rebuild the set */
 				// 直接遍历 intset
@@ -118,24 +121,17 @@ func rewriteAppendOnlyFile() int8 {
 					if !set_exists {
 						break
 					}
-					if _, err := fd.WriteString(cmd); err != nil {
+					if fwriteBulkCount(fd, '$', 2+key.setTypeSize()) == GODIS_ERR ||
+						fwriteBulkObject(fd, key) == GODIS_ERR ||
+						fwriteBulkObject(fd, set_key) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
 					}
-					if fwriteBulkObject(fd, key) == GODIS_ERR {
-						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-					}
-					if fwriteBulkObject(fd, set_key) == GODIS_ERR {
-						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-					}
-					//if fwriteBulkObject(fd, set_val) == GODIS_ERR {
-					//	log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-					//}
 				}
 			} else {
 				panic("Unknown set encoding")
 			}
 		} else if value.Type_ == GHASH {
-			cmd := "*3\r\n$4\r\nHSET\r\n"
+
 			if value.encoding != GODIS_ENCODING_HT {
 				innerIter := value.Val_.(*Dict).NewIterator(true) // 内层安全迭代器
 				defer innerIter.Close()                           // 确保迭代器关闭
@@ -144,16 +140,11 @@ func rewriteAppendOnlyFile() int8 {
 					if !hash_exists {
 						break
 					}
-					if _, err := fd.WriteString(cmd); err != nil {
-						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-					}
-					if fwriteBulkObject(fd, key) == GODIS_ERR {
-						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-					}
-					if fwriteBulkObject(fd, hash_key) == GODIS_ERR {
-						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-					}
-					if fwriteBulkObject(fd, hash_val) == GODIS_ERR {
+
+					if fwriteBulkCount(fd, '$', 2+key.setTypeSize()) == GODIS_ERR ||
+						fwriteBulkObject(fd, key) == GODIS_ERR ||
+						fwriteBulkObject(fd, hash_key) == GODIS_ERR ||
+						fwriteBulkObject(fd, hash_val) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
 					}
 				}
