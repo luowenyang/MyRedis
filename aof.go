@@ -86,10 +86,9 @@ func rewriteAppendOnlyFile() int8 {
 		return GODIS_ERR
 	}
 	defer fd.Close()
-	server.db.data.ForEach(func(e *Entry) bool {
-		key := e.Key
-		value := e.Value
-		fmt.Printf("key=%v, value=%v\n", key, value)
+	iter := server.db.data.NewIterator(true)
+	defer iter.Close()
+	for key, value, exists := iter.Next(); exists; key, value, exists = iter.Next() {
 		expiretime := getExpire(key)
 		if value.Type_ == GSTR {
 			/* Emit a SET command */
@@ -97,64 +96,67 @@ func rewriteAppendOnlyFile() int8 {
 			/* Key and value */
 			if _, err := fd.WriteString(cmd); err != nil {
 				log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-				return true
 			}
 			if fwriteBulkObject(fd, key) == GODIS_ERR {
 				log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-				return true
 			}
 			if fwriteBulkObject(fd, value) == GODIS_ERR {
 				log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-				return true
 			}
 		} else if value.Type_ == GSET {
 			cmd := "*3\r\n$4\r\nSADD\r\n"
 			if value.encoding == GODIS_ENCODING_INTSET {
 				/* Emit the SADDs needed to rebuild the set */
+				// 直接遍历 intset
 				// TODO inset
-			} else if value.encoding == GODIS_ENCODING_HT {
-				set := value.Val_.(*Dict)
-				set.ForEach(func(setEntry *Entry) bool {
+			} else if value.encoding != GODIS_ENCODING_HT {
+				// 使用安全迭代器遍历内部 dict
+				innerIter := value.Val_.(*Dict).NewIterator(true) // 内层安全迭代器
+				defer innerIter.Close()                           // 确保迭代器关闭
+				for {
+					set_key, _, set_exists := innerIter.Next() // 返回(key, val, exists)
+					if !set_exists {
+						break
+					}
 					if _, err := fd.WriteString(cmd); err != nil {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
-					if fwriteBulkObject(fd, setEntry.Key) == GODIS_ERR {
+					if fwriteBulkObject(fd, key) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
-					if fwriteBulkObject(fd, setEntry.Value) == GODIS_ERR {
+					if fwriteBulkObject(fd, set_key) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
-					return false // Continue iterating
-				})
+					//if fwriteBulkObject(fd, set_val) == GODIS_ERR {
+					//	log.Printf("Failed writing to the temporary AOF file: %v\n", err)
+					//}
+				}
 			} else {
 				panic("Unknown set encoding")
 			}
 		} else if value.Type_ == GHASH {
 			cmd := "*3\r\n$4\r\nHSET\r\n"
-			if value.encoding == GODIS_ENCODING_HT {
-				hash := value.Val_.(*Dict)
-				hash.ForEach(func(hashEntry *Entry) bool {
+			if value.encoding != GODIS_ENCODING_HT {
+				innerIter := value.Val_.(*Dict).NewIterator(true) // 内层安全迭代器
+				defer innerIter.Close()                           // 确保迭代器关闭
+				for {
+					hash_key, hash_val, hash_exists := innerIter.Next() // 返回(key, val, exists)
+					if !hash_exists {
+						break
+					}
 					if _, err := fd.WriteString(cmd); err != nil {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
 					if fwriteBulkObject(fd, key) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
-					if fwriteBulkObject(fd, hashEntry.Key) == GODIS_ERR {
+					if fwriteBulkObject(fd, hash_key) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
-					if fwriteBulkObject(fd, hashEntry.Value) == GODIS_ERR {
+					if fwriteBulkObject(fd, hash_val) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
-					return false // Continue iterating
-				})
+				}
 			} else if value.encoding == GODIS_ENCODING_ZIPMAP {
 				panic("Unknown hash encoding")
 			} else {
@@ -162,7 +164,6 @@ func rewriteAppendOnlyFile() int8 {
 			}
 		} else if value.Type_ == GLIST {
 			cmd := "*3\r\n$5\r\nRPUSH\r\n"
-
 			if value.encoding == GODIS_ENCODING_LINKEDLIST {
 				list := value.Val_.(*List)
 				p := list.First()
@@ -170,15 +171,12 @@ func rewriteAppendOnlyFile() int8 {
 					eleObj := p.Val
 					if _, err := fd.WriteString(cmd); err != nil {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
 					if fwriteBulkObject(fd, key) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
 					if fwriteBulkObject(fd, eleObj) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-						return true
 					}
 					// Move to the next node
 					p = p.next
@@ -196,20 +194,16 @@ func rewriteAppendOnlyFile() int8 {
 			cmd += fmt.Sprintf("$%d\r\n%s\r\n$%d\r\n%s\r\n", len(key.StrVal()), key.StrVal(), len(value.StrVal()), value.StrVal())
 			if _, err := fd.WriteString(cmd); err != nil {
 				log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-				return true
 			}
 			if fwriteBulkObject(fd, key) == GODIS_ERR {
 				log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-				return true
 			}
 			if fwriteBulkLongLong(fd, expiretime, len(key.StrVal())) == GODIS_ERR {
 				log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-				return true
 			}
 
 		}
-		return false
-	})
+	}
 	if os.Rename(tmpfile, server.appendfilename) != nil {
 		log.Printf("Failed to rename the temporary AOF file to the final AOF file: %v\n", err)
 		return GODIS_ERR

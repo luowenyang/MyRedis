@@ -30,6 +30,17 @@ type htable struct {
 	used  int64
 }
 
+// 迭代器类型
+type DictIterator struct {
+	d           *Dict
+	table       int    // 当前遍历的表(0或1)
+	index       int64  // 当前桶索引
+	entry       *Entry // 当前entry
+	nextEntry   *Entry // 下一个entry
+	safe        bool   // 是否为安全迭代器
+	fingerprint int64  // 迭代开始时字典的状态指纹
+}
+
 type DictType struct {
 	HashFunc  func(key *Gobj) int64
 	EqualFunc func(k1, k2 *Gobj) bool
@@ -37,8 +48,9 @@ type DictType struct {
 
 type Dict struct {
 	DictType
-	hts       [2]*htable
-	rehashidx int64
+	hts           [2]*htable
+	rehashidx     int64 // -1 表示未进行rehash
+	safeIterators int32 // 新增：安全迭代器计数
 }
 
 func DictCreate(dictType DictType) *Dict {
@@ -46,10 +58,6 @@ func DictCreate(dictType DictType) *Dict {
 	dic.DictType = dictType
 	dic.rehashidx = -1
 	return &dic
-}
-
-func (dict *Dict) isRehashing() bool {
-	return dict.rehashidx != -1
 }
 
 func (dict *Dict) Find(key *Gobj) *Entry {
@@ -125,6 +133,10 @@ func (dict *Dict) rehashStep() {
 }
 
 func (dict *Dict) rehash(step int) {
+	// 新增：有安全迭代器时暂停rehash
+	if dict.safeIterators > 0 {
+		return
+	}
 	for step > 0 {
 		if dict.hts[0].used == 0 {
 			dict.hts[0] = dict.hts[1]
@@ -319,19 +331,96 @@ func (dict *Dict) usedSize() int64 {
 	return retVal
 }
 
-// ForEach 遍历所有 Entry，回调函数返回 true 时提前终止遍历
-func (data *Dict) ForEach(fn func(e *Entry) bool) {
-	for tableIdx := 0; tableIdx <= 1; tableIdx++ {
-		ht := data.hts[tableIdx]
-		if ht == nil || ht.size == 0 {
+func (d *Dict) fingerprint() int64 {
+	var hash int64 = 5381
+
+	for i := 0; i < 2; i++ {
+		ht := d.hts[i]
+		if ht == nil {
 			continue
 		}
-		for i := int64(0); i < ht.size; i++ {
-			e := ht.table[i]
-			for e != nil {
-				fn(e)
-				e = e.next
+
+		// 哈希表元数据
+		hash = ((hash << 5) + hash) + ht.size
+		hash = ((hash << 5) + hash) + ht.used
+
+		// 遍历所有entry
+		for j := int64(0); j < ht.size; j++ {
+			entry := ht.table[j]
+			for entry != nil {
+				hash = ((hash << 5) + hash) + d.HashFunc(entry.Key)
+				// 这里要 考虑 set 结构中 value 为 空的 情况
+				if entry.Value != nil {
+					hash = ((hash << 5) + hash) + d.HashFunc(entry.Value)
+				}
+				entry = entry.next
 			}
 		}
 	}
+	return hash
 }
+
+func (d *Dict) isRehashing() bool {
+	return d.rehashidx != -1
+}
+
+// NewIterator 创建迭代器
+// safe=true 为安全迭代器(会阻止rehash)，safe=false 为非安全迭代器
+func (d *Dict) NewIterator(safe bool) *DictIterator {
+	iter := &DictIterator{
+		d:     d,
+		table: 0,
+		index: -1,
+		safe:  safe,
+	}
+
+	if safe {
+		// 安全迭代器：计算初始指纹
+		iter.fingerprint = d.fingerprint()
+	}
+
+	return iter
+}
+
+// Next 获取下一个键值对
+func (iter *DictIterator) Next() (key, val *Gobj, exists bool) {
+	for {
+		if iter.entry == nil {
+			// 移动到下一个桶
+			ht := iter.d.hts[iter.table]
+
+			iter.index++
+			if iter.index >= ht.size {
+				// 检查是否需要切换到第二个表
+				if iter.d.isRehashing() && iter.table == 0 {
+					iter.table++
+					iter.index = 0
+					ht = iter.d.hts[1]
+				} else {
+					return nil, nil, false
+				}
+			}
+
+			iter.entry = ht.table[iter.index]
+		} else {
+			iter.entry = iter.nextEntry
+		}
+
+		if iter.entry != nil {
+			iter.nextEntry = iter.entry.next
+			return iter.entry.Key, iter.entry.Value, true
+		}
+	}
+}
+
+// Close 关闭迭代器
+func (iter *DictIterator) Close() {
+	if iter.safe {
+		// 安全迭代器：检查指纹是否变化
+		if iter.fingerprint != iter.d.fingerprint() {
+			panic("concurrent dictionary modification detected")
+		}
+	}
+}
+
+// TODO 理解 这里的 迭代器 和 Rehash

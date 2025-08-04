@@ -31,7 +31,7 @@ func fwriteBulkObject(fp *os.File, o *Gobj) int8 {
 	} else if o.encoding == GODIS_ENCODING_RAW {
 		return fwriteBulkString(fp, o.StrVal())
 	} else {
-		panic("Unknown encoding type")
+		return fwriteBulkString(fp, o.StrVal())
 	}
 	return GODIS_ERR
 }
