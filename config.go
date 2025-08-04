@@ -26,5 +26,7 @@ func LoadConfig(path string) (config *Config, err error) {
 	if err = json.Unmarshal(jsonStr, config); err != nil {
 		return nil, err
 	}
+	server.appendonly = 1
+	server.appendfilename = "./redis.aof"
 	return
 }

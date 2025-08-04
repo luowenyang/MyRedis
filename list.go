@@ -58,7 +58,7 @@ func (list *List) Append(val *Gobj) {
 	}
 	list.length += 1
 }
-func (list *List) LPUsh(val *Gobj) {
+func (list *List) LPush(val *Gobj) {
 	var n Node
 	n.Val = val
 	if list.head == nil {

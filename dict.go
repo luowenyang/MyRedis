@@ -318,3 +318,20 @@ func (dict *Dict) usedSize() int64 {
 	}
 	return retVal
 }
+
+// ForEach 遍历所有 Entry，回调函数返回 true 时提前终止遍历
+func (data *Dict) ForEach(fn func(e *Entry) bool) {
+	for tableIdx := 0; tableIdx <= 1; tableIdx++ {
+		ht := data.hts[tableIdx]
+		if ht == nil || ht.size == 0 {
+			continue
+		}
+		for i := int64(0); i < ht.size; i++ {
+			e := ht.table[i]
+			for e != nil {
+				fn(e)
+				e = e.next
+			}
+		}
+	}
+}

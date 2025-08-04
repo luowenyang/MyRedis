@@ -62,20 +62,3 @@ func rdbLoad(filename string) {
 func loadingProgress(pos int) {
 
 }
-
-//func main() {
-//	file, err := os.Create("example.txt")
-//	if err != nil {
-//		panic(err)
-//	}
-//	defer file.Close()
-//
-//	writer := bufio.NewWriter(file)
-//	_, err = writer.WriteString("Hello, World!\n")
-//	if err != nil {
-//		panic(err)
-//	}
-//
-//	// 确保所有缓冲数据都写入底层io.Writer
-//	writer.Flush()
-//}

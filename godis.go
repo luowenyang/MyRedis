@@ -33,6 +33,11 @@ const (
 	LIST_HEAD int8 = 1
 	LIST_TAIL int8 = 2
 )
+const (
+	CMD_WRITE int = 1 << iota
+	CMD_READ
+	CMD_OTHER
+)
 
 // CRLF 是 redis 统一的行分隔符协议
 const CRLF = "\r\n"
@@ -57,6 +62,8 @@ type GodisServer struct {
 	lastsave       int64
 	saveparams     *saveparam
 	saveparamslen  int
+	bgrewritebuf   string /* buffer taken by parent during oppend only rewrite */
+	aofbuf         string /* AOF buffer, written before entering the event loop */
 }
 
 type GodisClient struct {
@@ -79,60 +86,61 @@ type GodisCommand struct {
 	name  string
 	proc  CommandProc
 	arity int
+	flags int
 }
 
 // Global Varibles
 var server GodisServer
 var cmdTable = []GodisCommand{
 
-	{"expireat", expireAtCommand, 3},
-	{"expire", expireCommand, 3},
+	{"expireat", expireAtCommand, 3, CMD_WRITE},
+	{"expire", expireCommand, 3, CMD_WRITE},
 
-	{"del", delCommand, -2},
+	{"del", delCommand, -2, CMD_WRITE},
 
 	//string
-	{"get", getCommand, 2},
-	{"set", setCommand, 3},
-	{"mget", mgetCommand, -2},
-	{"mset", msetCommand, -3},
-	{"msetnx", msetnxCommand, -4},
-	{"setnx", setnxCommand, 3},
-	{"setex", setexCommand, 4},
+	{"get", getCommand, 2, CMD_READ},
+	{"set", setCommand, 3, CMD_WRITE},
+	{"mget", mgetCommand, -2, CMD_READ},
+	{"mset", msetCommand, -3, CMD_WRITE},
+	{"msetnx", msetnxCommand, -4, CMD_WRITE},
+	{"setnx", setnxCommand, 3, CMD_WRITE},
+	{"setex", setexCommand, 4, CMD_WRITE},
 
 	// list
-	{"rpush", rpushCommand, 3},
-	{"lpush", lpushCommand, 3},
-	{"rpop", rpopCommand, 2},
-	{"lpop", lpopCommand, 2},
-	{"lrange", lrangeCommand, 4},
-	{"lindex", lindexCommand, 3},
-	{"llen", llenCommand, 2},
-	{"lrem", lremCommand, 4},
+	{"rpush", rpushCommand, 3, CMD_WRITE},
+	{"lpush", lpushCommand, 3, CMD_WRITE},
+	{"rpop", rpopCommand, 2, CMD_WRITE},
+	{"lpop", lpopCommand, 2, CMD_WRITE},
+	{"lrange", lrangeCommand, 4, CMD_READ},
+	{"lindex", lindexCommand, 3, CMD_READ},
+	{"llen", llenCommand, 2, CMD_READ},
+	{"lrem", lremCommand, 4, CMD_WRITE},
 
 	// set
-	{"sadd", saddCommand, -3},
-	{"srem", sremCommand, -3},
-	{"sismember", sismemberCommand, 3},
+	{"sadd", saddCommand, -3, CMD_WRITE},
+	{"srem", sremCommand, -3, CMD_WRITE},
+	{"sismember", sismemberCommand, 3, CMD_READ},
 	// TODO
-	{"smembers", smembersCommand, 2},
-	{"scard", scardCommand, 2},
+	{"smembers", smembersCommand, 2, CMD_READ},
+	{"scard", scardCommand, 2, CMD_READ},
 
 	// hash
-	{"hset", hsetCommand, -4},
-	{"hsetnx", hsetnxCommand, 4},
+	{"hset", hsetCommand, -4, CMD_WRITE},
+	{"hsetnx", hsetnxCommand, 4, CMD_WRITE},
 	// TODO
-	{"hkeys", hkeysCommand, 2},
-	{"hvals", hvalsCommand, 2},
+	{"hkeys", hkeysCommand, 2, CMD_READ},
+	{"hvals", hvalsCommand, 2, CMD_READ},
 
-	{"hget", hgetCommand, 3},
-	{"hdel", hdelCommand, -3},
+	{"hget", hgetCommand, 3, CMD_READ},
+	{"hdel", hdelCommand, -3, CMD_WRITE},
 
 	//zset
 
 	//persist
-	{"save", saveCommand, 1},
-	{"bgsave", bgsaveCommand, 1},
-	{"bgrewriteaof", bgrewriteaofCommand, 1},
+	{"save", saveCommand, 1, CMD_OTHER},
+	{"bgsave", bgsaveCommand, 1, CMD_OTHER},
+	{"bgrewriteaof", bgrewriteaofCommand, 1, CMD_OTHER},
 }
 
 func hdelCommand(c *GodisClient) {
@@ -166,6 +174,16 @@ func hkeysCommand(c *GodisClient) {
 
 }
 
+func getExpire(key *Gobj) int64 {
+	if server.db.expire == nil {
+		return -1
+	}
+	expObj := server.db.expire.Get(key)
+	if expObj == nil {
+		return -1
+	}
+	return expObj.Val_.(int64)
+}
 func hsetnxCommand(c *GodisClient) {
 	key := c.args[1]
 	field := c.args[2]
@@ -397,7 +415,7 @@ func pushGenericCommand(c *GodisClient, where int8) {
 
 	// 添加元素到列表
 	if where == LIST_HEAD {
-		list.LPUsh(val)
+		list.LPush(val)
 	} else {
 		list.Append(val)
 	}
@@ -542,7 +560,15 @@ func rpushCommand(c *GodisClient) {
 }
 
 func bgrewriteaofCommand(c *GodisClient) {
-
+	// if server.bgsavechildpid != -1 {
+	// 	c.AddReplyError("Background save already in progress")
+	// 	return
+	// }
+	if rewriteAppendOnlyFileBackground() != nil {
+		c.AddReplyError("Failed to start background AOF rewrite")
+		return
+	}
+	c.AddReplyStr("+Background append-only file rewrite started" + CRLF)
 }
 
 func bgsaveCommand(c *GodisClient) {
@@ -752,7 +778,7 @@ func expireCommand(c *GodisClient) {
 	val := c.args[2]
 	if val.Type_ != GSTR {
 		//TODO: extract shared.strings
-		c.AddReplyStr("-ERR: wrong type\r\n")
+		c.AddReplyStr("-ERR: wrong type" + CRLF)
 	}
 	expire := GetMsTime() + (val.IntVal() * 1000)
 	expObj := CreateFromInt(expire)
@@ -823,8 +849,11 @@ func ProcessCommand(c *GodisClient) {
 		return
 	}
 	cmd.proc(c)
+	// TODO server.dirty > 0
+	if cmd.flags == CMD_WRITE {
+		FeedAppendOnlyFile(cmd, c.args)
+	}
 	resetClient(c)
-
 	// 处理完命令后，主动尝试发送回复
 	if c.reply.Length() > 0 {
 		SendReplyToClient(server.aeLoop, c.fd, c)
@@ -1113,14 +1142,17 @@ func initServer(config *Config) error {
 }
 
 func main() {
-	path := os.Args[1]
+	//path := os.Args[1]
+	path := "./config.json"
 	config, err := LoadConfig(path)
 	if err != nil {
 		log.Printf("config error: %v\n", err)
+		return
 	}
 	err = initServer(config)
 	if err != nil {
 		log.Printf("init server error: %v\n", err)
+		return
 	}
 	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
 	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil)
