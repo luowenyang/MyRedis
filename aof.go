@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"github.com/jinzhu/copier"
 	"log"
 	"os"
 )
@@ -38,6 +37,8 @@ func flushAppendOnlyFile() {
 	if err := server.appendfd.Sync(); err != nil {
 		log.Printf("Error syncing AOF file: %v\n", err)
 	}
+	/* 要确保数据不会只停留在操作系统的输出缓冲区里。*/
+	server.appendfd.Sync()
 	server.appendfd.Close()
 	server.appendfd = nil
 	server.lastfsync = GetMsTime()
@@ -67,21 +68,18 @@ func startAppendOnly() int8 {
 }
 func rewriteAppendOnlyFileBackground() error {
 	// 模拟fork的COW
-	snapshot := MockCOW()
-	go func() {
-		rewriteAppendOnlyFile(snapshot)
-	}()
+	rewriteAppendOnlyFile(server.db)
 	return nil
 }
 
-func MockCOW() *GodisDB {
-	snapshot := GodisDB{}
-	err := copier.CopyWithOption(&snapshot, server.db, copier.Option{DeepCopy: true})
-	if err != nil {
-		return nil
-	}
-	return &snapshot
-}
+// func MockCOW() *GodisDB {
+// 	snapshot := GodisDB{}
+// 	err := copier.CopyWithOption(&snapshot, server.db, copier.Option{DeepCopy: true})
+// 	if err != nil {
+// 		return nil
+// 	}
+// 	return &snapshot
+// }
 
 func rewriteListObject(key, o *Gobj) {
 	//count := int64(0)
@@ -151,7 +149,7 @@ func rewriteAppendOnlyFile(db *GodisDB) int8 {
 						count = 0
 					}
 				}
-				innerIter.Close() // 确保迭代器关闭
+				defer innerIter.Close() // 确保迭代器关闭
 			} else {
 				panic("Unknown set encoding")
 			}
@@ -183,33 +181,36 @@ func rewriteAppendOnlyFile(db *GodisDB) int8 {
 						count = 0
 					}
 				}
-				innerIter.Close() // 确保迭代器关闭
+				defer innerIter.Close() // 确保迭代器关闭
 			} else if value.encoding == GODIS_ENCODING_ZIPMAP {
 				panic("Unknown hash encoding")
 			} else {
 				panic("Unknown hash encoding")
 			}
 		} else if value.Type_ == GLIST {
-			cmd := "*3\r\n$5\r\nRPUSH\r\n"
-			if value.encoding == GODIS_ENCODING_LINKEDLIST {
-				list := value.Val_.(*List)
-				p := list.First()
-				for p != nil {
-					eleObj := p.Val
-					if _, err := fd.WriteString(cmd); err != nil {
+			// 直接遍历链表
+			list := value.Val_.(*List)
+			items := list.Length()
+			count := int64(0)
+			for node := list.First(); node != nil; node = node.next {
+				if count == 0 {
+					cmd_items := int(min(items, AOF_REWRITE_ITEMS_PER_CMD))
+					if fwriteBulkCount(fd, '$', 2+cmd_items) == GODIS_ERR ||
+						fwriteBulkString(fd, "rpush") == GODIS_ERR ||
+						fwriteBulkObject(fd, key) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
+						return GODIS_ERR
 					}
-					if fwriteBulkObject(fd, key) == GODIS_ERR {
-						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-					}
-					if fwriteBulkObject(fd, eleObj) == GODIS_ERR {
-						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
-					}
-					// Move to the next node
-					p = p.next
 				}
-			} else {
-				panic("Unknown list encoding")
+				if fwriteBulkObject(fd, node.Val) == GODIS_ERR {
+					log.Printf("Failed writing to the temporary AOF file: %v\n", err)
+					return GODIS_ERR
+				}
+				count++
+				items--
+				if count == AOF_REWRITE_ITEMS_PER_CMD {
+					count = 0
+				}
 			}
 		} else if value.Type_ == GZSET {
 
@@ -236,6 +237,7 @@ func rewriteAppendOnlyFile(db *GodisDB) int8 {
 		return GODIS_ERR
 	}
 	log.Printf("AppendOnly file rewrite completed successfully.\n")
+	fd.Sync()
 	return GODIS_OK
 }
 

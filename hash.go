@@ -62,3 +62,19 @@ func (hash *Gobj) hashTypeDelete(fields []*Gobj) int {
 	log.Default().Printf("hashTypeDelete deleted %d fields", hashDict.usedSize())
 	return deleted
 }
+
+func (hash *Gobj) hashTypeFields(k, v bool) []*Gobj {
+	hashDict := hash.Val_.(*Dict)
+	results := make([]*Gobj, 0, hashDict.usedSize())
+	iter := hashDict.NewIterator(true)
+	for key, val, exists := iter.Next(); exists; key, val, exists = iter.Next() {
+		if k {
+			results = append(results, key)
+		}
+		if v {
+			results = append(results, val)
+		}
+	}
+	iter.Close()
+	return results
+}

@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -62,6 +64,7 @@ type GodisServer struct {
 	lastsave       int64
 	saveparams     *saveparam
 	saveparamslen  int
+	dbfilename     string
 	bgrewritebuf   string /* buffer taken by parent during oppend only rewrite */
 	aofbuf         string /* AOF buffer, written before entering the event loop */
 }
@@ -74,7 +77,7 @@ type GodisClient struct {
 	sentLen  int
 	queryBuf []byte
 	queryLen int
-	cmdTy    CmdType
+	cmdType  CmdType
 	bulkNum  int
 	bulkLen  int
 }
@@ -108,8 +111,8 @@ var cmdTable = []GodisCommand{
 	{"setex", setexCommand, 4, CMD_WRITE},
 
 	// list
-	{"rpush", rpushCommand, 3, CMD_WRITE},
-	{"lpush", lpushCommand, 3, CMD_WRITE},
+	{"rpush", rpushCommand, -3, CMD_WRITE},
+	{"lpush", lpushCommand, -3, CMD_WRITE},
 	{"rpop", rpopCommand, 2, CMD_WRITE},
 	{"lpop", lpopCommand, 2, CMD_WRITE},
 	{"lrange", lrangeCommand, 4, CMD_READ},
@@ -121,17 +124,14 @@ var cmdTable = []GodisCommand{
 	{"sadd", saddCommand, -3, CMD_WRITE},
 	{"srem", sremCommand, -3, CMD_WRITE},
 	{"sismember", sismemberCommand, 3, CMD_READ},
-	// TODO
 	{"smembers", smembersCommand, 2, CMD_READ},
 	{"scard", scardCommand, 2, CMD_READ},
 
 	// hash
 	{"hset", hsetCommand, -4, CMD_WRITE},
 	{"hsetnx", hsetnxCommand, 4, CMD_WRITE},
-	// TODO
 	{"hkeys", hkeysCommand, 2, CMD_READ},
 	{"hvals", hvalsCommand, 2, CMD_READ},
-
 	{"hget", hgetCommand, 3, CMD_READ},
 	{"hdel", hdelCommand, -3, CMD_WRITE},
 
@@ -141,6 +141,65 @@ var cmdTable = []GodisCommand{
 	{"save", saveCommand, 1, CMD_OTHER},
 	{"bgsave", bgsaveCommand, 1, CMD_OTHER},
 	{"bgrewriteaof", bgrewriteaofCommand, 1, CMD_OTHER},
+
+	{"info", infoCommand, 2, CMD_OTHER},
+
+	{"hello", helloCommand, 2, CMD_OTHER},
+}
+
+func helloCommand(c *GodisClient) {
+	// 1. 构造服务器信息
+	fields := []struct {
+		k string
+		v interface{}
+	}{
+		{"server", "godis"},
+		{"version", "0.1"},
+		{"proto", 3},
+		{"id", 1},
+		{"mode", "standalone"},
+		{"role", "master"},
+		{"modules", []string{}},
+	}
+
+	// 2. RESP3: 返回数组，每个元素是键值对
+	c.AddReplyStr(fmt.Sprintf("*%d\r\n", len(fields)*2))
+	for _, field := range fields {
+		// 键
+		c.AddReplyStr(fmt.Sprintf("$%d\r\n%s\r\n", len(field.k), field.k))
+		// 值
+		switch v := field.v.(type) {
+		case string:
+			c.AddReplyStr(fmt.Sprintf("$%d\r\n%s\r\n", len(v), v))
+		case int:
+			c.AddReplyStr(fmt.Sprintf(":%d\r\n", v))
+		case []string:
+			c.AddReplyStr(fmt.Sprintf("*%d\r\n", len(v)))
+			for _, item := range v {
+				c.AddReplyStr(fmt.Sprintf("$%d\r\n%s\r\n", len(item), item))
+			}
+		default:
+			c.AddReplyError("Unsupported value type")
+			return
+		}
+	}
+}
+
+func infoCommand(c *GodisClient) {
+	if c.args[1].StrVal() != "memory" {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	info := fmt.Sprintf(
+		"# Memory\r\nused_memory:%d b %.2f kb %.2f MiB %.2f GB\r\n",
+		m.Alloc,
+		float64(m.Alloc)/1024,
+		float64(m.Alloc)/1024/1024,
+		float64(m.Alloc)/1024/1024/1024,
+	)
+	c.AddReplyStr(info)
 }
 
 func hdelCommand(c *GodisClient) {
@@ -166,12 +225,39 @@ func hdelCommand(c *GodisClient) {
 	c.AddReplyInt(deleted)
 }
 
+// 获取哈希表的所有值
 func hvalsCommand(c *GodisClient) {
-
+	hashGenericCommand(false, true, c)
 }
 
-func hkeysCommand(c *GodisClient) {
+func hashGenericCommand(k, v bool, c *GodisClient) {
+	key := c.args[1]
+	hashObj := lookupKeyWrite(key)
+	if hashObj == nil {
+		c.AddReplyStr("*0" + CRLF)
+		return
+	}
+	if hashObj.Type_ != GHASH {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	fields := hashObj.hashTypeFields(k, v)
+	if len(fields) == 0 {
+		c.AddReplyStr("*0" + CRLF)
+		return
+	}
+	var reply strings.Builder
+	reply.WriteString(fmt.Sprintf("*%d"+CRLF, len(fields)))
+	for _, field := range fields {
+		val := field.StrVal()
+		reply.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(val), val))
+	}
+	c.AddReplyStr(reply.String())
+}
 
+// 获取哈希表的所有字段
+func hkeysCommand(c *GodisClient) {
+	hashGenericCommand(true, false, c)
 }
 
 func getExpire(key *Gobj) int64 {
@@ -282,7 +368,26 @@ func scardCommand(c *GodisClient) {
 }
 
 func smembersCommand(c *GodisClient) {
-
+	key := c.args[1]
+	set := lookupKeyWrite(key)
+	if set == nil {
+		c.AddReplyStr("*0" + CRLF)
+	} else if set.Type_ != GSET {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+	} else {
+		members := set.setTypeMembers()
+		if len(members) == 0 {
+			c.AddReplyStr("*0" + CRLF)
+			return
+		}
+		var reply strings.Builder
+		reply.WriteString(fmt.Sprintf("*%d"+CRLF, len(members)))
+		for _, member := range members {
+			val := member.StrVal()
+			reply.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(val), val))
+		}
+		c.AddReplyStr(reply.String())
+	}
 }
 
 func sismemberCommand(c *GodisClient) {
@@ -311,8 +416,61 @@ func sremCommand(c *GodisClient) {
 	c.AddReplyLong(removed)
 }
 
+/*
+lrem key count value
+ 1. count > 0 : 从头到尾删除 count 个值为 value 的元素
+ 2. count < 0 : 从尾到头删除 count 个值为 value 的元素
+*/
 func lremCommand(c *GodisClient) {
+	key := c.args[1]
+	countObj := c.args[2]
+	value := c.args[3]
 
+	lobj := lookupKeyWrite(key)
+	if lobj == nil {
+		c.AddReplyInt(0)
+		return
+	}
+	if lobj.Type_ != GLIST {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	count := countObj.IntVal()
+	list := lobj.Val_.(*List)
+	removed := int64(0)
+
+	if count == 0 {
+		// 删除所有匹配的元素
+		for node := list.First(); node != nil; {
+			nextNode := node.next // 先保存下一个节点，因为当前节点可能会被删除
+			if list.EqualFunc(node.Val, value) {
+				list.DelNode(node)
+				removed++
+			}
+			node = nextNode
+		}
+	} else if count > 0 {
+		// 从头到尾删除 count 个匹配的元素
+		for node := list.First(); node != nil && removed < count; {
+			nextNode := node.next
+			if list.EqualFunc(node.Val, value) {
+				list.DelNode(node)
+				removed++
+			}
+			node = nextNode
+		}
+	} else {
+		// 从尾到头删除 -count 个匹配的元素
+		for node := list.Last(); node != nil && removed < -count; {
+			prevNode := node.prev // 先保存上一个节点，因为当前节点可能会被删除
+			if list.EqualFunc(node.Val, value) {
+				list.DelNode(node)
+				removed++
+			}
+			node = prevNode
+		}
+	}
+	c.AddReplyLong(removed)
 }
 
 func saddCommand(c *GodisClient) {
@@ -396,32 +554,30 @@ func lindexCommand(c *GodisClient) {
 
 func pushGenericCommand(c *GodisClient, where int8) {
 	key := c.args[1]
-	val := c.args[2]
 	lobj := lookupKeyWrite(key)
 	// 查找或创建列表
 	var list *List
 	if lobj == nil {
 		// 创建新的列表
-		obj := CreateListObject()
-		server.db.data.Set(key, obj)
-		obj.DecrRefCount()
-	} else {
-		if lobj.Type_ != GLIST {
-			c.AddReplyError("Operation against a key holding the wrong kind of value")
-			return
-		}
-		list = lobj.Val_.(*List)
+		lobj = CreateListObject()
+		server.db.data.Set(key, lobj)
+		lobj.DecrRefCount()
+	} else if lobj.Type_ != GLIST {
+		c.AddReplyError("Operation against a key holding the wrong kind of value")
+		return
 	}
-
+	list = lobj.Val_.(*List)
 	// 添加元素到列表
-	if where == LIST_HEAD {
-		list.LPush(val)
-	} else {
-		list.Append(val)
+	for i := 2; i < len(c.args); i++ {
+		val := c.args[i]
+		if where == LIST_HEAD {
+			list.LPush(val)
+		} else {
+			list.Append(val)
+		}
+		// 增加值的引用计数
+		val.IncrRefCount()
 	}
-	// 增加值的引用计数
-	val.IncrRefCount()
-
 	// 回复客户端
 	c.AddReplyStr(fmt.Sprintf(":%d"+CRLF, list.Length()))
 }
@@ -576,11 +732,16 @@ func bgsaveCommand(c *GodisClient) {
 }
 
 func saveCommand(c *GodisClient) {
-	if server.bgsavechildpid != -1 {
-		c.AddReplyError("Background save already in progress")
+	// TODO bgsavechildpid
+	// if server.bgsavechildpid != -1 {
+	// 	c.AddReplyError("Background save already in progress")
+	// 	return
+	// }
+	if rdbSave(server.dbfilename, server.db) != nil {
+		c.AddReplyError("Error saving DB on disk")
 		return
 	}
-
+	c.AddReplyStr("+OK" + CRLF)
 }
 
 func expireAtCommand(c *GodisClient) {
@@ -757,7 +918,7 @@ func getCommand(c *GodisClient) {
 		c.AddReplyError("wrong type")
 	} else {
 		str := val.StrVal()
-		c.AddReplyStr(fmt.Sprintf("$%d%v\r\n", len(str), str))
+		c.AddReplyStr(fmt.Sprintf("$%d\r\n%v\r\n", len(str), str))
 	}
 }
 
@@ -788,8 +949,9 @@ func expireCommand(c *GodisClient) {
 }
 
 func lookupCommand(cmdStr string) *GodisCommand {
+	cmdStrLower := strings.ToLower(cmdStr)
 	for _, c := range cmdTable {
-		if c.name == cmdStr {
+		if c.name == cmdStrLower {
 			return &c
 		}
 	}
@@ -885,7 +1047,7 @@ func freeClient(client *GodisClient) {
 
 func resetClient(client *GodisClient) {
 	freeArgs(client)
-	client.cmdTy = COMMAND_UNKNOWN
+	client.cmdType = COMMAND_UNKNOWN
 	client.bulkLen = 0
 	client.bulkNum = 0
 }
@@ -982,19 +1144,19 @@ func handleBulkBuf(client *GodisClient) (bool, error) {
 
 func ProcessQueryBuf(client *GodisClient) error {
 	for client.queryLen > 0 {
-		if client.cmdTy == COMMAND_UNKNOWN {
+		if client.cmdType == COMMAND_UNKNOWN {
 			if client.queryBuf[0] == '*' {
-				client.cmdTy = COMMAND_BULK
+				client.cmdType = COMMAND_BULK
 			} else {
-				client.cmdTy = COMMAND_INLINE
+				client.cmdType = COMMAND_INLINE
 			}
 		}
 		// trans query -> args
 		var ok bool
 		var err error
-		if client.cmdTy == COMMAND_INLINE {
+		if client.cmdType == COMMAND_INLINE {
 			ok, err = handleInlineBuf(client)
-		} else if client.cmdTy == COMMAND_BULK {
+		} else if client.cmdType == COMMAND_BULK {
 			ok, err = handleBulkBuf(client)
 		} else {
 			return errors.New("unknow Godis Command Type")
@@ -1143,6 +1305,7 @@ func initServer(config *Config) error {
 
 func main() {
 	//path := os.Args[1]
+	log.SetOutput(io.Discard) // 关闭日志输出
 	path := "./config.json"
 	config, err := LoadConfig(path)
 	if err != nil {

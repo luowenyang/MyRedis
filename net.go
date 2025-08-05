@@ -1,8 +1,9 @@
 package main
 
 import (
-	"golang.org/x/sys/unix"
 	"log"
+
+	"golang.org/x/sys/unix"
 )
 
 const BACKLOG int = 64
@@ -19,7 +20,7 @@ func TcpServer(port int) (int, error) {
 		unix.Close(s)
 		return -1, nil
 	}
-	err = unix.SetsockoptInt(s, unix.SOL_SOCKET, unix.SO_REUSEPORT, port)
+	err = unix.SetsockoptInt(s, unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
 	if err != nil {
 		log.Printf("set SO_REUSEADDR error: %v\n", err)
 		unix.Close(s)

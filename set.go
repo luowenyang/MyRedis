@@ -52,3 +52,15 @@ func (set *Gobj) setTypeIsMember(key *Gobj) int8 {
 	}
 	return 1
 }
+func (set *Gobj) setTypeMembers() []*Gobj {
+	// 获取集合字典
+	dict := set.Val_.(*Dict)
+	members := make([]*Gobj, 0, dict.usedSize())
+	iter := dict.NewIterator(true) // 内层安全迭代器
+	for key, _, exists := iter.Next(); exists; key, _, exists = iter.Next() {
+		members = append(members, key)
+	}
+	iter.Close()
+	// 返回所有成员
+	return members
+}

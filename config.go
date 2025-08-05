@@ -28,5 +28,6 @@ func LoadConfig(path string) (config *Config, err error) {
 	}
 	server.appendonly = 1
 	server.appendfilename = "./redis.aof"
+	server.dbfilename = "./redis.db"
 	return
 }
