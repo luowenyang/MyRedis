@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/jinzhu/copier"
 	"log"
 	"os"
 )
@@ -65,11 +66,21 @@ func startAppendOnly() int8 {
 	return GODIS_OK
 }
 func rewriteAppendOnlyFileBackground() error {
-	if rewriteAppendOnlyFile() == GODIS_ERR {
-		log.Printf("Failed to start background AOF rewrite: appendonly is not enabled.\n")
-		return fmt.Errorf("appendonly is not enabled")
-	}
+	// 模拟fork的COW
+	snapshot := MockCOW()
+	go func() {
+		rewriteAppendOnlyFile(snapshot)
+	}()
 	return nil
+}
+
+func MockCOW() *GodisDB {
+	snapshot := GodisDB{}
+	err := copier.CopyWithOption(&snapshot, server.db, copier.Option{DeepCopy: true})
+	if err != nil {
+		return nil
+	}
+	return &snapshot
 }
 
 func rewriteListObject(key, o *Gobj) {
@@ -82,7 +93,7 @@ func rewriteSetObject(key, o *Gobj) {
 
 }
 
-func rewriteAppendOnlyFile() int8 {
+func rewriteAppendOnlyFile(db *GodisDB) int8 {
 	tmpfile := fmt.Sprintf("temp-rewriteaof-bg-%d.aof", os.Getpid())
 	fd, err := os.OpenFile(tmpfile, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -90,7 +101,7 @@ func rewriteAppendOnlyFile() int8 {
 		return GODIS_ERR
 	}
 	defer fd.Close()
-	iter := server.db.data.NewIterator(true)
+	iter := db.data.NewIterator(true)
 	defer iter.Close()
 	for key, value, exists := iter.Next(); exists; key, value, exists = iter.Next() {
 		expiretime := getExpire(key)
@@ -115,39 +126,64 @@ func rewriteAppendOnlyFile() int8 {
 			} else if value.encoding != GODIS_ENCODING_HT {
 				// 使用安全迭代器遍历内部 dict
 				innerIter := value.Val_.(*Dict).NewIterator(true) // 内层安全迭代器
-				defer innerIter.Close()                           // 确保迭代器关闭
+				items := value.setTypeSize()
+				count := int64(0)
 				for {
 					set_key, _, set_exists := innerIter.Next() // 返回(key, val, exists)
 					if !set_exists {
 						break
 					}
-					if fwriteBulkCount(fd, '$', 2+key.setTypeSize()) == GODIS_ERR ||
-						fwriteBulkObject(fd, key) == GODIS_ERR ||
-						fwriteBulkObject(fd, set_key) == GODIS_ERR {
+					if count == 0 {
+						cmd_items := int(min(items, AOF_REWRITE_ITEMS_PER_CMD))
+						if fwriteBulkCount(fd, '$', 2+cmd_items) == GODIS_ERR ||
+							fwriteBulkString(fd, "sadd") == GODIS_ERR ||
+							fwriteBulkObject(fd, key) == GODIS_ERR {
+							log.Printf("Failed writing to the temporary AOF file: %v\n", err)
+						}
+					}
+					if fwriteBulkObject(fd, set_key) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
+						return GODIS_ERR
+					}
+					count++
+					items--
+					if count == AOF_REWRITE_ITEMS_PER_CMD {
+						count = 0
 					}
 				}
+				innerIter.Close() // 确保迭代器关闭
 			} else {
 				panic("Unknown set encoding")
 			}
 		} else if value.Type_ == GHASH {
-
 			if value.encoding != GODIS_ENCODING_HT {
 				innerIter := value.Val_.(*Dict).NewIterator(true) // 内层安全迭代器
-				defer innerIter.Close()                           // 确保迭代器关闭
+				items := value.setTypeSize()
+				count := int64(0)
 				for {
 					hash_key, hash_val, hash_exists := innerIter.Next() // 返回(key, val, exists)
 					if !hash_exists {
 						break
 					}
-
-					if fwriteBulkCount(fd, '$', 2+key.setTypeSize()) == GODIS_ERR ||
-						fwriteBulkObject(fd, key) == GODIS_ERR ||
-						fwriteBulkObject(fd, hash_key) == GODIS_ERR ||
-						fwriteBulkObject(fd, hash_val) == GODIS_ERR {
+					if count == 0 {
+						cmd_items := int(min(items, AOF_REWRITE_ITEMS_PER_CMD))
+						if fwriteBulkCount(fd, '$', 2+cmd_items) == GODIS_ERR ||
+							fwriteBulkString(fd, "hset") == GODIS_ERR {
+							log.Printf("Failed writing to the temporary AOF file: %v\n", err)
+							return GODIS_ERR
+						}
+					}
+					if fwriteBulkObject(fd, hash_key) == GODIS_ERR || fwriteBulkObject(fd, hash_val) == GODIS_ERR {
 						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
+						return GODIS_ERR
+					}
+					count++
+					items--
+					if count == AOF_REWRITE_ITEMS_PER_CMD {
+						count = 0
 					}
 				}
+				innerIter.Close() // 确保迭代器关闭
 			} else if value.encoding == GODIS_ENCODING_ZIPMAP {
 				panic("Unknown hash encoding")
 			} else {

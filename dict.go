@@ -270,6 +270,7 @@ func (dict *Dict) Delete(key *Gobj) error {
 					prev.next = e.next
 				}
 				freeEntry(e)
+				dict.hts[i].used--
 				return nil
 			}
 			prev = e
