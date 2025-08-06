@@ -1044,7 +1044,7 @@ func ProcessCommand(c *GodisClient) {
 	cmd.proc(c)
 	// TODO server.dirty > 0
 	if cmd.flags == CMD_WRITE {
-		//FeedAppendOnlyFile(cmd, c.args)
+		FeedAppendOnlyFile(cmd, c.args)
 	}
 	resetClient(c)
 	// 处理完命令后，主动尝试发送回复

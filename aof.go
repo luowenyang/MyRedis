@@ -24,7 +24,7 @@ func flushAppendOnlyFile() {
 	}
 	if server.appendfd == nil {
 		var err error
-		server.appendfd, err = os.OpenFile(server.appendfilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		server.appendfd, err = os.OpenFile(server.appendfilename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 		if err != nil {
 			log.Printf("Error opening AOF file: %v\n", err)
 			return
@@ -256,7 +256,7 @@ func loadAppendOnlyFile() {
 		return
 	}
 	server.aofbuf = ""
-	server.appendfd, _ = os.OpenFile(server.appendfilename, os.O_APPEND|os.O_CREATE|os.O_RDONLY, 0644)
+	server.appendfd, _ = os.OpenFile(server.appendfilename, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 	if server.appendfd == nil {
 		log.Printf("Used tried to switch on AOF via CONFIG, but I can't open the AOF file: %s\n", server.appendfilename)
 		return
@@ -269,9 +269,9 @@ func loadAppendOnlyFile() {
 			log.Printf("ReadLine error: %s", err)
 			return
 		}
-		//if lineBytes[0] != '*' {
-		//	return
-		//}
+		if lineBytes[0] != '*' {
+			return
+		}
 		argc, err := strconv.Atoi(string(lineBytes[1:]))
 		if err != nil {
 			log.Printf("Atoi error: %s", err)
