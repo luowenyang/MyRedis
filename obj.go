@@ -4,7 +4,7 @@ import (
 	"strconv"
 )
 
-type Gtype uint8
+type Gtype byte
 
 const (
 	GSTR  Gtype = 0x00

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -67,13 +69,6 @@ func rdbSave(filename string, db *GodisDB) error {
 }
 
 func rdbSaveBackground() {
-
-}
-
-func rdbLoad(filename string) {
-
-}
-func loadingProgress(pos int) {
 
 }
 func rdbSaveObject(file *os.File, o *Gobj) (int, error) {
@@ -161,7 +156,6 @@ func rdbSaveTime(file *os.File, t int64) (int, error) {
 
 func rdbSaveLen(file *os.File, length uint32) (int, error) {
 	var buf []byte
-
 	switch {
 	case length < 1<<6: // 0xxxxxxx
 		// 前两位 00，后6位是数值
@@ -184,4 +178,186 @@ func rdbSaveLen(file *os.File, length uint32) (int, error) {
 
 	n, err := file.Write(buf)
 	return n, err
+}
+
+func rdbLoad(filename string) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return errors.New("open file error")
+	}
+	defer file.Close()
+	var expireTime int64
+	loops := int64(0)
+	var type_ byte
+	for {
+		if (loops % 1000) == 1 {
+			// 每1000次循环执行一次进度更新
+			loadingProgress()
+			// TODO 更新进度条给 客户端
+		}
+		loops++
+		type_, _ = rdbLoadType(file)
+		if type_ == GODIS_EXPIRETIME {
+
+		} else if type_ == GODIS_EOF {
+			break
+		}
+		if type_ == GODIS_EXPIRETIME {
+			// 处理过期时间
+			expireTime, err = rdbLoadTime(file)
+			if err != nil {
+				return err
+			}
+			type_, err = rdbLoadType(file)
+			if err != nil {
+				return err
+			}
+		} else if type_ == GODIS_EOF {
+			// 文件结束
+			break
+		} else {
+			return fmt.Errorf("unknown type: %d", type_)
+		}
+		key, _ := rdbLoadStringObject(file)
+		value, _ := rdbLoadObject(Gtype(type_), file)
+		// 检查是否过期
+		if expireTime != -1 && expireTime < GetMsTime() {
+			// 过期
+			key.DecrRefCount()
+			value.DecrRefCount()
+			continue
+		}
+		server.db.data.Set(key, value)
+		server.db.expire.Set(key, CreateFromInt(expireTime))
+	}
+	return nil
+}
+
+const DICT_HT_INITIAL_SIZE = 4
+
+func rdbLoadObject(type_ Gtype, file *os.File) (*Gobj, error) {
+	if type_ == GSTR {
+		return rdbLoadStringObject(file)
+	} else if type_ == GSET {
+		// 读取集合长度
+		length, err := rdbLoadLen(file)
+		if err != nil {
+			return nil, err
+		}
+		// 创建新的集合对象
+		set := CreateSetObject().Val_.(*Dict)
+		if length > DICT_HT_INITIAL_SIZE {
+			// TODO 直接拓展到指定大小
+		}
+		for i := uint64(0); i < length; i++ {
+			elem, err := rdbLoadStringObject(file)
+			if err != nil {
+				return nil, err
+			}
+			set.Set(elem, nil)
+		}
+		return &Gobj{Type_: GSET, Val_: set}, nil
+	} else if type_ == GLIST {
+		// 读取列表长度
+		length, err := rdbLoadLen(file)
+		if err != nil {
+			return nil, err
+		}
+		// 创建新的列表对象
+		list := CreateListObject().Val_.(*List)
+		for i := uint64(0); i < length; i++ {
+			elem, err := rdbLoadStringObject(file)
+			if err != nil {
+				return nil, err
+			}
+			list.Append(elem)
+		}
+		return &Gobj{Type_: GLIST, Val_: list}, nil
+	} else if type_ == GHASH {
+		// 读取哈希表长度
+		length, err := rdbLoadLen(file)
+		if err != nil {
+			return nil, err
+		}
+		// 创建新的哈希表对象
+		hash := CreateHashObject().Val_.(*Dict)
+		for i := uint64(0); i < length; i++ {
+			key, err := rdbLoadStringObject(file)
+			if err != nil {
+				return nil, err
+			}
+			val, err := rdbLoadStringObject(file)
+			if err != nil {
+				return nil, err
+			}
+			hash.Set(key, val)
+		}
+		return &Gobj{Type_: GHASH, Val_: hash}, nil
+	} else if type_ == GZSET {
+		// TODO: 实现有序集合的加载
+		return nil, fmt.Errorf("zset type not implemented yet")
+	} else {
+		return nil, fmt.Errorf("unknown type: %d", type_)
+	}
+}
+
+func rdbLoadLen(file *os.File) (uint64, error) {
+	// 读取第一个字节以确定编码方式
+	firstByte := make([]byte, 1)
+	_, err := file.Read(firstByte)
+	if err != nil {
+		return 0, err
+	}
+
+	// 检查前两位以确定长度编码类型
+	switch {
+	case firstByte[0]>>6 == 0: // 00xxxxxx
+		// 6位长度
+		return uint64(firstByte[0] & 0x3F), nil
+	case firstByte[0]>>6 == 1: // 01xxxxxx
+		// 14位长度，需要读取下一个字节
+		secondByte := make([]byte, 1)
+		_, err := file.Read(secondByte)
+		if err != nil {
+			return 0, err
+		}
+		return uint64(firstByte[0]&0x3F)<<8 | uint64(secondByte[0]), nil
+	default: // 10......
+		// 6位后跟4字节长度
+		buf := make([]byte, 4)
+		_, err := io.ReadFull(file, buf)
+		if err != nil {
+			return 0, err
+		}
+		return uint64(buf[0])<<24 | uint64(buf[1])<<16 | uint64(buf[2])<<8 | uint64(buf[3]), nil
+	}
+}
+
+func rdbLoadStringObject(file *os.File) (*Gobj, error) {
+	return nil, nil
+}
+
+func rdbLoadTime(file *os.File) (int64, error) {
+	var buf [4]byte // 使用数组而非切片，避免堆分配
+	_, err := io.ReadFull(file, buf[:])
+	if err != nil {
+		return 0, err
+	}
+	return int64(buf[0]) | int64(buf[1])<<8 | int64(buf[2])<<16 | int64(buf[3])<<24, nil
+}
+func rdbLoadType(file *os.File) (byte, error) {
+	buf := make([]byte, 1)
+	_, err := file.Read(buf)
+	if err != nil {
+		return 0, err
+	}
+	return buf[0], nil
+}
+func loadingProgress() {
+	// 这里可以添加实际的进度更新逻辑，例如：
+	// 1. 计算已处理的数据量
+	// 2. 计算总的文件大小
+	// 3. 计算百分比并输出到控制台或更新进度条
+	// 示例伪代码：
+	// fmt.Printf("Loading progress: %d%%\n", percentage)
 }
