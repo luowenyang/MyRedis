@@ -2,9 +2,10 @@ package main
 
 import (
 	"errors"
-	"golang.org/x/sys/unix"
 	"log"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type FeType int
@@ -113,7 +114,7 @@ func (loop *AeLoop) RemoveFileEvent(fd int, mask FeType) {
 	// 注册监听socket事件
 	event := unix.Kevent_t{
 		Ident:  uint64(fd),
-		Filter: unix.EVFILT_READ,
+		Filter: int16(fe2ep[mask]),
 		Flags:  unix.EV_DELETE,
 	}
 	//err := unix.EpollCtl(loop.fileEventFd, op, fd, &unix.EpollEvent{Fd: int32(fd), Events: ev})
@@ -223,13 +224,13 @@ func (loop *AeLoop) AeWait() (tes []*AeTimeEvent, fes []*AeFileEvent) {
 	}
 	// collect file events
 	for i := 0; i < n; i++ {
-		if events[i].Filter&unix.EVFILT_READ != 0 {
+		if events[i].Filter == unix.EVFILT_READ {
 			fe := loop.FileEvents[getFeKey(int(events[i].Ident), AE_READABLE)]
 			if fe != nil {
 				fes = append(fes, fe)
 			}
 		}
-		if events[i].Filter&unix.EVFILT_WRITE != 0 {
+		if events[i].Filter == unix.EVFILT_WRITE {
 			fe := loop.FileEvents[getFeKey(int(events[i].Ident), AE_WRITABLE)]
 			if fe != nil {
 				fes = append(fes, fe)

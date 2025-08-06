@@ -47,6 +47,7 @@ func rdbSave(filename string, db *GodisDB) error {
 				return err
 			}
 		}
+		// [类型][len][key(string)][list,hash,set len]{[value(字节数组)],[len][value(字节数组)],[len][value(字节数组)]}
 		rdbSaveType(tmpFile, []byte{byte(value.Type_)})
 		rdbSaveStringObject(tmpFile, key)
 		rdbSaveObject(tmpFile, value)
@@ -124,6 +125,7 @@ func rdbSaveRawString(file *os.File, s string) (int, error) {
 func rdbSaveStringObject(file *os.File, o *Gobj) (int, error) {
 	switch o.encoding {
 	case GODIS_ENCODING_RAW:
+		rdbSaveLen(file, uint32(len(o.Val_.(string))))
 		return rdbSaveRawString(file, o.Val_.(string))
 	case GODIS_ENCODING_INT:
 		val := o.IntVal()
@@ -133,8 +135,10 @@ func rdbSaveStringObject(file *os.File, o *Gobj) (int, error) {
 			byte((val >> 16) & 0xFF),
 			byte((val >> 24) & 0xFF),
 		}
+		rdbSaveLen(file, 4)
 		return rdbWriteRaw(file, data)
 	}
+	rdbSaveLen(file, uint32(len(o.Val_.(string))))
 	rdbSaveRawString(file, o.Val_.(string))
 	return 0, nil
 }
@@ -186,22 +190,10 @@ func rdbLoad(filename string) error {
 		return errors.New("open file error")
 	}
 	defer file.Close()
-	var expireTime int64
-	loops := int64(0)
+	expireTime := int64(-1)
 	var type_ byte
 	for {
-		if (loops % 1000) == 1 {
-			// 每1000次循环执行一次进度更新
-			loadingProgress()
-			// TODO 更新进度条给 客户端
-		}
-		loops++
 		type_, _ = rdbLoadType(file)
-		if type_ == GODIS_EXPIRETIME {
-
-		} else if type_ == GODIS_EOF {
-			break
-		}
 		if type_ == GODIS_EXPIRETIME {
 			// 处理过期时间
 			expireTime, err = rdbLoadTime(file)
@@ -215,8 +207,6 @@ func rdbLoad(filename string) error {
 		} else if type_ == GODIS_EOF {
 			// 文件结束
 			break
-		} else {
-			return fmt.Errorf("unknown type: %d", type_)
 		}
 		key, _ := rdbLoadStringObject(file)
 		value, _ := rdbLoadObject(Gtype(type_), file)
@@ -227,8 +217,8 @@ func rdbLoad(filename string) error {
 			value.DecrRefCount()
 			continue
 		}
+		expireTime = -1 // 重置过期时间
 		server.db.data.Set(key, value)
-		server.db.expire.Set(key, CreateFromInt(expireTime))
 	}
 	return nil
 }
@@ -334,14 +324,27 @@ func rdbLoadLen(file *os.File) (uint64, error) {
 }
 
 func rdbLoadStringObject(file *os.File) (*Gobj, error) {
-	return nil, nil
+	length, err := rdbLoadLen(file)
+	if err != nil {
+		return nil, err
+	}
+	if length == 0 {
+		return CreateObject(GSTR, ""), nil
+	}
+	buf := make([]byte, length)
+	_, err = io.ReadFull(file, buf)
+	if err != nil {
+		return nil, err
+	}
+	str := string(buf)
+	return CreateObject(GSTR, str), nil
 }
 
 func rdbLoadTime(file *os.File) (int64, error) {
 	var buf [4]byte // 使用数组而非切片，避免堆分配
 	_, err := io.ReadFull(file, buf[:])
 	if err != nil {
-		return 0, err
+		return -1, err
 	}
 	return int64(buf[0]) | int64(buf[1])<<8 | int64(buf[2])<<16 | int64(buf[3])<<24, nil
 }
@@ -352,12 +355,4 @@ func rdbLoadType(file *os.File) (byte, error) {
 		return 0, err
 	}
 	return buf[0], nil
-}
-func loadingProgress() {
-	// 这里可以添加实际的进度更新逻辑，例如：
-	// 1. 计算已处理的数据量
-	// 2. 计算总的文件大小
-	// 3. 计算百分比并输出到控制台或更新进度条
-	// 示例伪代码：
-	// fmt.Printf("Loading progress: %d%%\n", percentage)
 }

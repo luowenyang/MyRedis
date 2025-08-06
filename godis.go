@@ -60,6 +60,7 @@ type GodisServer struct {
 	appendonly     int
 	lastfsync      int64
 	appendfd       *os.File
+	appendfsync    string
 	appendfilename string
 	lastsave       int64
 	saveparams     *saveparam
@@ -145,6 +146,32 @@ var cmdTable = []GodisCommand{
 	{"info", infoCommand, 2, CMD_OTHER},
 
 	{"hello", helloCommand, 2, CMD_OTHER},
+
+	//兼容 redis-benchmark
+	{"config", configCommand, -1, CMD_OTHER},
+	{"ping", pingCommand, 1, CMD_OTHER},
+	/*
+		redis-benchmark -p 6767 -t set,get,lpush,rpush,del,setnx,setex,rpop,lpop,lrange,lindex,llen,lrem,sadd,srem,sismember,smembers,scard,hset,hsetnx,hkeys,hvals,hget,hdel
+		redis-benchmark -t set,get,lpush,rpush,del,setnx,setex,rpop,lpop,lrange,lindex,llen,lrem,sadd,srem,sismember,smembers,scard,hset,hsetnx,hkeys,hvals,hget,hdel
+	*/
+}
+
+func pingCommand(c *GodisClient) {
+	c.AddReplyStr("+PONG\r\n")
+}
+func configCommand(c *GodisClient) {
+	if c.args[1].StrVal() == "GET" {
+		switch c.args[2].StrVal() {
+		case "save":
+			c.AddReplyStr("*2\r\n$4\r\nsave\r\n$23\r\n3600 1 300 100 60 10000\r\n")
+		case "appendonly":
+			c.AddReplyStr("*2\r\n$10\r\nappendonly\r\n$2\r\nno\r\n")
+		default:
+			c.AddReplyError("Unknown CONFIG option")
+		}
+	} else if c.args[1].StrVal() == "SET" {
+		return
+	}
 }
 
 func helloCommand(c *GodisClient) {
@@ -1013,7 +1040,7 @@ func ProcessCommand(c *GodisClient) {
 	cmd.proc(c)
 	// TODO server.dirty > 0
 	if cmd.flags == CMD_WRITE {
-		FeedAppendOnlyFile(cmd, c.args)
+		//FeedAppendOnlyFile(cmd, c.args)
 	}
 	resetClient(c)
 	// 处理完命令后，主动尝试发送回复
@@ -1317,6 +1344,8 @@ func main() {
 		log.Printf("init server error: %v\n", err)
 		return
 	}
+	// 加载 RDB 数据库
+	rdbLoad(server.dbfilename)
 	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
 	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil)
 	log.Println("godis server is up.")
