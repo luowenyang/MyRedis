@@ -988,6 +988,10 @@ func (c *GodisClient) AddReplyError(errInfo string) {
 	c.AddReplyStr("-ERR:" + errInfo + CRLF)
 }
 func (c *GodisClient) AddReply(o *Gobj) {
+	if c.fd < 0 {
+		// 如果是 mock 终端，就不回复了
+		return
+	}
 	c.reply.Append(o)
 	o.IncrRefCount()
 	server.aeLoop.AddFileEvent(c.fd, AE_WRITABLE, SendReplyToClient, c)
@@ -1344,8 +1348,10 @@ func main() {
 		log.Printf("init server error: %v\n", err)
 		return
 	}
+	// 加载AOF 文件
+	loadAppendOnlyFile()
 	// 加载 RDB 数据库
-	rdbLoad(server.dbfilename)
+	//rdbLoad(server.dbfilename)
 	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
 	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil)
 	log.Println("godis server is up.")

@@ -1,14 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 )
 
 func stopAppendOnly() {
 	flushAppendOnlyFile()
-
 	server.appendfd = nil
 	server.appendonly = 0
 }
@@ -70,25 +71,6 @@ func rewriteAppendOnlyFileBackground() error {
 	// 模拟fork的COW
 	rewriteAppendOnlyFile(server.db)
 	return nil
-}
-
-// func MockCOW() *GodisDB {
-// 	snapshot := GodisDB{}
-// 	err := copier.CopyWithOption(&snapshot, server.db, copier.Option{DeepCopy: true})
-// 	if err != nil {
-// 		return nil
-// 	}
-// 	return &snapshot
-// }
-
-func rewriteListObject(key, o *Gobj) {
-	//count := int64(0)
-
-}
-
-func rewriteSetObject(key, o *Gobj) {
-	//count := int64(0)
-
 }
 
 func rewriteAppendOnlyFile(db *GodisDB) int8 {
@@ -274,10 +256,59 @@ func loadAppendOnlyFile() {
 		return
 	}
 	server.aofbuf = ""
-	server.appendfd, _ = os.OpenFile(server.appendfilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	server.appendfd, _ = os.OpenFile(server.appendfilename, os.O_APPEND|os.O_CREATE|os.O_RDONLY, 0644)
 	if server.appendfd == nil {
 		log.Printf("Used tried to switch on AOF via CONFIG, but I can't open the AOF file: %s\n", server.appendfilename)
 		return
+	}
+	mockClient := &GodisClient{}
+	reader := bufio.NewReader(server.appendfd) //不需要 再定义 buffer 了内置了 4kb 的buffer
+	for {
+		lineBytes, _, err := reader.ReadLine()
+		if err != nil {
+			log.Printf("ReadLine error: %s", err)
+			return
+		}
+		//if lineBytes[0] != '*' {
+		//	return
+		//}
+		argc, err := strconv.Atoi(string(lineBytes[1:]))
+		if err != nil {
+			log.Printf("Atoi error: %s", err)
+			return
+		}
+		argv := make([]*Gobj, argc)
+		for i := 0; i < argc; i++ {
+			//再读一行
+			lineBytes, _, err := reader.ReadLine()
+			if lineBytes[0] != '$' {
+				log.Printf("Loading Append Only File eror: Error Format File")
+				return
+			}
+			if err != nil {
+				log.Printf("ReadLine error: %s", err)
+				return
+			}
+			//argv_len, err := strconv.Atoi(string(lineBytes[1:]))
+			if err != nil {
+				log.Printf("Atoi error: %s", err)
+				return
+			}
+			lineBytes, _, err = reader.ReadLine()
+			if err != nil {
+				log.Printf("ReadLine error: %s", err)
+				return
+			}
+			argv[i] = CreateObject(GSTR, string(lineBytes[0:])) // \r 不要
+		}
+		mockClient.fd = -1
+		mockClient.args = argv
+		cmd := lookupCommand(argv[0].StrVal())
+		cmd.proc(mockClient)
+
+		for i := 0; i < len(mockClient.args); i++ {
+			mockClient.args[i].DecrRefCount()
+		}
 	}
 
 	defer server.appendfd.Close()
