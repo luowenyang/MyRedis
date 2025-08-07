@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 )
 
 type saveparam struct {
@@ -73,10 +74,11 @@ func rdbSaveBackground() {
 
 }
 func rdbSaveObject(file *os.File, o *Gobj) (int, error) {
-	if o.Type_ == GSTR {
+	switch o.Type_ {
+	case GSTR:
 		return rdbSaveStringObject(file, o)
-	} else if o.Type_ == GLIST {
-		// o.encoding == GODIS_ENCODING_LINKEDLIST
+	case GLIST:
+		//GODIS_ENCODING_LINKEDLIST
 		list := o.Val_.(*List)
 		// 先保存长度
 		rdbSaveLen(file, uint32(list.Length()))
@@ -86,12 +88,11 @@ func rdbSaveObject(file *os.File, o *Gobj) (int, error) {
 			rdbSaveStringObject(file, elem)
 		}
 		return 0, nil
-	} else if o.Type_ == GZSET {
+	case GZSET:
 		// TODO
 		return 0, nil
-	} else if o.Type_ == GSET {
+	case GSET:
 		// o.encoding == GODIS_ENCODING_HT
-		// TODO NCODING_INTSET
 		dict := o.Val_.(*Dict)
 		// 先保存长度
 		rdbSaveLen(file, uint32(dict.usedSize()))
@@ -101,7 +102,8 @@ func rdbSaveObject(file *os.File, o *Gobj) (int, error) {
 			rdbSaveStringObject(file, key)
 		}
 		iter.Close()
-	} else if o.Type_ == GHASH {
+	case GHASH:
+		// o.encoding == GODIS_ENCODING_HT
 		dict := o.Val_.(*Dict)
 		rdbSaveLen(file, uint32(dict.usedSize()))
 		iter := dict.NewIterator(true) // 内层安全迭代器
@@ -110,7 +112,7 @@ func rdbSaveObject(file *os.File, o *Gobj) (int, error) {
 			rdbSaveStringObject(file, val)
 		}
 		iter.Close()
-	} else {
+	default:
 		return 0, fmt.Errorf("unsupported type: %d", o.Type_)
 	}
 
@@ -128,15 +130,9 @@ func rdbSaveStringObject(file *os.File, o *Gobj) (int, error) {
 		rdbSaveLen(file, uint32(len(o.Val_.(string))))
 		return rdbSaveRawString(file, o.Val_.(string))
 	case GODIS_ENCODING_INT:
-		val := o.IntVal()
-		data := []byte{
-			byte(val & 0xFF),
-			byte((val >> 8) & 0xFF),
-			byte((val >> 16) & 0xFF),
-			byte((val >> 24) & 0xFF),
-		}
-		rdbSaveLen(file, 4)
-		return rdbWriteRaw(file, data)
+		str := strconv.FormatInt(o.Val_.(int64), 10) // "123456789"
+		rdbSaveLen(file, uint32(len(str)))
+		return rdbSaveRawString(file, str)
 	}
 	rdbSaveLen(file, uint32(len(o.Val_.(string))))
 	rdbSaveRawString(file, o.Val_.(string))
@@ -226,9 +222,15 @@ func rdbLoad(filename string) error {
 const DICT_HT_INITIAL_SIZE = 4
 
 func rdbLoadObject(type_ Gtype, file *os.File) (*Gobj, error) {
-	if type_ == GSTR {
-		return rdbLoadStringObject(file)
-	} else if type_ == GSET {
+	switch type_ {
+	case GSTR:
+		o, err := rdbLoadStringObject(file)
+		if isInteger(o.StrVal()) {
+			num, err := strconv.ParseInt(string(o.StrVal()), 10, 64)
+			return CreateFromInt(num), err
+		}
+		return o, err
+	case GSET:
 		// 读取集合长度
 		length, err := rdbLoadLen(file)
 		if err != nil {
@@ -246,8 +248,8 @@ func rdbLoadObject(type_ Gtype, file *os.File) (*Gobj, error) {
 			}
 			set.Set(elem, nil)
 		}
-		return &Gobj{Type_: GSET, Val_: set}, nil
-	} else if type_ == GLIST {
+		return &Gobj{Type_: GSET, Val_: set, encoding: GODIS_ENCODING_HT}, nil
+	case GLIST:
 		// 读取列表长度
 		length, err := rdbLoadLen(file)
 		if err != nil {
@@ -262,8 +264,8 @@ func rdbLoadObject(type_ Gtype, file *os.File) (*Gobj, error) {
 			}
 			list.Append(elem)
 		}
-		return &Gobj{Type_: GLIST, Val_: list}, nil
-	} else if type_ == GHASH {
+		return &Gobj{Type_: GLIST, Val_: list, encoding: GODIS_ENCODING_LINKEDLIST}, nil
+	case GHASH:
 		// 读取哈希表长度
 		length, err := rdbLoadLen(file)
 		if err != nil {
@@ -282,11 +284,11 @@ func rdbLoadObject(type_ Gtype, file *os.File) (*Gobj, error) {
 			}
 			hash.Set(key, val)
 		}
-		return &Gobj{Type_: GHASH, Val_: hash}, nil
-	} else if type_ == GZSET {
+		return &Gobj{Type_: GHASH, Val_: hash, encoding: GODIS_ENCODING_HT}, nil
+	case GZSET:
 		// TODO: 实现有序集合的加载
 		return nil, fmt.Errorf("zset type not implemented yet")
-	} else {
+	default:
 		return nil, fmt.Errorf("unknown type: %d", type_)
 	}
 }
@@ -329,7 +331,7 @@ func rdbLoadStringObject(file *os.File) (*Gobj, error) {
 		return nil, err
 	}
 	if length == 0 {
-		return CreateObject(GSTR, ""), nil
+		return CreateObject(GSTR, nil), nil
 	}
 	buf := make([]byte, length)
 	_, err = io.ReadFull(file, buf)
@@ -338,6 +340,11 @@ func rdbLoadStringObject(file *os.File) (*Gobj, error) {
 	}
 	str := string(buf)
 	return CreateObject(GSTR, str), nil
+}
+
+func isInteger(s string) bool {
+	_, err := strconv.ParseInt(s, 10, 64)
+	return err == nil
 }
 
 func rdbLoadTime(file *os.File) (int64, error) {

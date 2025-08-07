@@ -26,14 +26,16 @@ func fwriteBulkString(fp *os.File, s string) int8 {
 }
 
 func fwriteBulkObject(fp *os.File, o *Gobj) int8 {
-	if o.encoding == GODIS_ENCODING_INT {
-		return fwriteBulkLongLong(fp, o.IntVal(), len(o.StrVal()))
-	} else if o.encoding == GODIS_ENCODING_RAW {
+	switch o.encoding {
+	case GODIS_ENCODING_INT:
+		// 把 整形转为 字符串 在写到AOF文件中
+		str := strconv.FormatInt(o.Val_.(int64), 10) // "123456789"
+		return fwriteBulkString(fp, str)
+	case GODIS_ENCODING_RAW:
 		return fwriteBulkString(fp, o.StrVal())
-	} else {
+	default:
 		return fwriteBulkString(fp, o.StrVal())
 	}
-	return GODIS_ERR
 }
 func fwriteBulkCount(fp *os.File, char byte, count int) int8 {
 	s := fmt.Sprintf("%c%v\r\n", char, count)

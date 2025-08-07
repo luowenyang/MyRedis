@@ -94,16 +94,38 @@ func (o *Gobj) StrVal() string {
 func CreateFromInt(val int64) *Gobj {
 	return &Gobj{
 		Type_:    GSTR,
-		Val_:     strconv.FormatInt(val, 10),
+		Val_:     val,
 		refCount: 1,
+		encoding: GODIS_ENCODING_INT,
 	}
 }
 
 func CreateObject(typ Gtype, ptr interface{}) *Gobj {
+	encoding := GODIS_ENCODING_RAW
+	if typ == GSTR {
+		switch ptr.(type) {
+		case string:
+			// ok
+		case int64:
+			encoding = GODIS_ENCODING_INT
+		default:
+			panic("invalid type for GSTR")
+		}
+	}
+	if typ == GSET {
+		encoding = GODIS_ENCODING_HT
+	}
+	if typ == GHASH {
+		encoding = GODIS_ENCODING_HT
+	}
+	if typ == GLIST {
+		encoding = GODIS_ENCODING_LINKEDLIST
+	}
 	return &Gobj{
 		Type_:    typ,
 		Val_:     ptr,
 		refCount: 1,
+		encoding: encoding,
 	}
 }
 

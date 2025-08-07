@@ -351,7 +351,8 @@ func (d *Dict) fingerprint() int64 {
 			for entry != nil {
 				hash = ((hash << 5) + hash) + d.HashFunc(entry.Key)
 				// 这里要 考虑 set 结构中 value 为 空的 情况
-				if entry.Value != nil {
+				if entry.Value != nil && entry.Value.encoding != GODIS_ENCODING_INT {
+					// TODO bug 这里如果是数字 无法计算哈希
 					hash = ((hash << 5) + hash) + d.HashFunc(entry.Value)
 				}
 				entry = entry.next

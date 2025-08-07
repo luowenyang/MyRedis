@@ -35,9 +35,6 @@ func flushAppendOnlyFile() {
 	if _, err := server.appendfd.WriteString(server.aofbuf); err != nil {
 		log.Printf("Error writing to AOF file: %v\n", err)
 	}
-	if err := server.appendfd.Sync(); err != nil {
-		log.Printf("Error syncing AOF file: %v\n", err)
-	}
 	/* 要确保数据不会只停留在操作系统的输出缓冲区里。*/
 	server.appendfd.Sync()
 	server.appendfd.Close()
@@ -99,11 +96,7 @@ func rewriteAppendOnlyFile(db *GodisDB) int8 {
 				log.Printf("Failed writing to the temporary AOF file: %v\n", err)
 			}
 		} else if value.Type_ == GSET {
-			if value.encoding == GODIS_ENCODING_INTSET {
-				/* Emit the SADDs needed to rebuild the set */
-				// 直接遍历 intset
-				// TODO inset
-			} else if value.encoding != GODIS_ENCODING_HT {
+			if value.encoding != GODIS_ENCODING_HT {
 				// 使用安全迭代器遍历内部 dict
 				innerIter := value.Val_.(*Dict).NewIterator(true) // 内层安全迭代器
 				items := value.setTypeSize()
@@ -265,6 +258,10 @@ func loadAppendOnlyFile() {
 	reader := bufio.NewReader(server.appendfd) //不需要 再定义 buffer 了内置了 4kb 的buffer
 	for {
 		lineBytes, _, err := reader.ReadLine()
+		// 读到文件末尾
+		if len(lineBytes) == 0 {
+			return
+		}
 		if err != nil {
 			log.Printf("ReadLine error: %s", err)
 			return
@@ -289,11 +286,6 @@ func loadAppendOnlyFile() {
 				log.Printf("ReadLine error: %s", err)
 				return
 			}
-			//argv_len, err := strconv.Atoi(string(lineBytes[1:]))
-			if err != nil {
-				log.Printf("Atoi error: %s", err)
-				return
-			}
 			lineBytes, _, err = reader.ReadLine()
 			if err != nil {
 				log.Printf("ReadLine error: %s", err)
@@ -310,6 +302,4 @@ func loadAppendOnlyFile() {
 			mockClient.args[i].DecrRefCount()
 		}
 	}
-
-	defer server.appendfd.Close()
 }

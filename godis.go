@@ -138,6 +138,9 @@ var cmdTable = []GodisCommand{
 
 	//zset
 
+	{"incr", incrCommand, 2, CMD_WRITE},
+	{"decr", decrCommand, 2, CMD_WRITE},
+
 	//persist
 	{"save", saveCommand, 1, CMD_OTHER},
 	{"bgsave", bgsaveCommand, 1, CMD_OTHER},
@@ -147,8 +150,6 @@ var cmdTable = []GodisCommand{
 
 	{"hello", helloCommand, 2, CMD_OTHER},
 
-	{"select", selectCommand, 2, CMD_OTHER},
-
 	//兼容 redis-benchmark
 	{"config", configCommand, -1, CMD_OTHER},
 	{"ping", pingCommand, 1, CMD_OTHER},
@@ -156,10 +157,6 @@ var cmdTable = []GodisCommand{
 		redis-benchmark -p 6767 -t set,get,lpush,rpush,del,setnx,setex,rpop,lpop,lrange,lindex,llen,lrem,sadd,srem,sismember,smembers,scard,hset,hsetnx,hkeys,hvals,hget,hdel
 		redis-benchmark -t set,get,lpush,rpush,del,setnx,setex,rpop,lpop,lrange,lindex,llen,lrem,sadd,srem,sismember,smembers,scard,hset,hsetnx,hkeys,hvals,hget,hdel
 	*/
-}
-
-func selectCommand(c *GodisClient) {
-	c.AddReplyStr("OK\r\n")
 }
 
 func pingCommand(c *GodisClient) {
@@ -216,6 +213,32 @@ func helloCommand(c *GodisClient) {
 			return
 		}
 	}
+}
+
+func incrDecrCommand(c *GodisClient, isIncr bool) {
+	key := c.args[1]
+	obj := lookupKeyWrite(key)
+	if obj == nil {
+		obj = CreateObject(GSTR, int64(0))
+		err := server.db.data.Add(key, obj)
+		if err != nil {
+			return
+		}
+	}
+	// 自增操作
+	if isIncr {
+		obj.Val_ = obj.Val_.(int64) + 1
+	} else {
+		obj.Val_ = obj.Val_.(int64) - 1
+	}
+	c.AddReplyStr(fmt.Sprintf(":%d\r\n", obj.Val_.(int64)))
+}
+
+func incrCommand(c *GodisClient) {
+	incrDecrCommand(c, true)
+}
+func decrCommand(c *GodisClient) {
+	incrDecrCommand(c, false)
 }
 
 func infoCommand(c *GodisClient) {
@@ -942,15 +965,21 @@ func findKeyRead(key *Gobj) *Gobj {
 
 func getCommand(c *GodisClient) {
 	key := c.args[1]
-	val := findKeyRead(key)
-	if val == nil {
+	valObj := findKeyRead(key)
+	if valObj == nil {
 		//TODO: extract shared.strings
 		c.AddReplyStr("$-1\r\n")
-	} else if val.Type_ != GSTR {
+	} else if valObj.Type_ != GSTR {
 		//TODO: extract shared.strings
 		c.AddReplyError("wrong type")
 	} else {
-		str := val.StrVal()
+		var str string
+		switch valObj.encoding {
+		case GODIS_ENCODING_INT:
+			str = fmt.Sprintf("%d", valObj.Val_.(int64))
+		case GODIS_ENCODING_RAW:
+			str = valObj.StrVal()
+		}
 		c.AddReplyStr(fmt.Sprintf("$%d\r\n%v\r\n", len(str), str))
 	}
 }
@@ -1050,7 +1079,7 @@ func ProcessCommand(c *GodisClient) {
 	cmd.proc(c)
 	// TODO server.dirty > 0
 	if cmd.flags == CMD_WRITE {
-		FeedAppendOnlyFile(cmd, c.args)
+		// FeedAppendOnlyFile(cmd, c.args)
 	}
 	resetClient(c)
 	// 处理完命令后，主动尝试发送回复
@@ -1357,7 +1386,7 @@ func main() {
 	// 加载AOF 文件
 	//loadAppendOnlyFile()
 	// 加载 RDB 数据库
-	//rdbLoad(server.dbfilename)
+	rdbLoad(server.dbfilename)
 	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
 	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil)
 	log.Println("godis server is up.")
