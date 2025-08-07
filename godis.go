@@ -147,6 +147,8 @@ var cmdTable = []GodisCommand{
 
 	{"hello", helloCommand, 2, CMD_OTHER},
 
+	{"select", selectCommand, 2, CMD_OTHER},
+
 	//兼容 redis-benchmark
 	{"config", configCommand, -1, CMD_OTHER},
 	{"ping", pingCommand, 1, CMD_OTHER},
@@ -154,6 +156,10 @@ var cmdTable = []GodisCommand{
 		redis-benchmark -p 6767 -t set,get,lpush,rpush,del,setnx,setex,rpop,lpop,lrange,lindex,llen,lrem,sadd,srem,sismember,smembers,scard,hset,hsetnx,hkeys,hvals,hget,hdel
 		redis-benchmark -t set,get,lpush,rpush,del,setnx,setex,rpop,lpop,lrange,lindex,llen,lrem,sadd,srem,sismember,smembers,scard,hset,hsetnx,hkeys,hvals,hget,hdel
 	*/
+}
+
+func selectCommand(c *GodisClient) {
+	c.AddReplyStr("OK\r\n")
 }
 
 func pingCommand(c *GodisClient) {
@@ -1349,7 +1355,7 @@ func main() {
 		return
 	}
 	// 加载AOF 文件
-	loadAppendOnlyFile()
+	//loadAppendOnlyFile()
 	// 加载 RDB 数据库
 	//rdbLoad(server.dbfilename)
 	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
