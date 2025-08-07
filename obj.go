@@ -111,15 +111,14 @@ func CreateObject(typ Gtype, ptr interface{}) *Gobj {
 		default:
 			panic("invalid type for GSTR")
 		}
-	}
-	if typ == GSET {
+	} else if typ == GSET {
 		encoding = GODIS_ENCODING_HT
-	}
-	if typ == GHASH {
+	} else if typ == GHASH {
 		encoding = GODIS_ENCODING_HT
-	}
-	if typ == GLIST {
+	} else if typ == GLIST {
 		encoding = GODIS_ENCODING_LINKEDLIST
+	} else if typ == GZSET {
+		encoding = GODIS_ENCODING_SKIPLIST
 	}
 	return &Gobj{
 		Type_:    typ,
@@ -150,6 +149,17 @@ func CreateListObject() *Gobj {
 		EqualFunc: GStrEqual,
 	})
 	o := CreateObject(GLIST, list)
+	return o
+}
+func CreateZSetObject() *Gobj {
+	zset_ := zset{
+		dict: DictCreate(DictType{
+			EqualFunc: GStrEqual,
+			HashFunc:  GStrHash,
+		}),
+		zsl: zslCreate(),
+	}
+	o := CreateObject(GZSET, zset_)
 	return o
 }
 

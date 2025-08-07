@@ -137,6 +137,7 @@ var cmdTable = []GodisCommand{
 	{"hdel", hdelCommand, -3, CMD_WRITE},
 
 	//zset
+	{"zadd", zaddCommand, -4, CMD_WRITE},
 
 	{"incr", incrCommand, 2, CMD_WRITE},
 	{"decr", decrCommand, 2, CMD_WRITE},
@@ -175,6 +176,22 @@ func configCommand(c *GodisClient) {
 	} else if c.args[1].StrVal() == "SET" {
 		return
 	}
+}
+func infoCommand(c *GodisClient) {
+	if c.args[1].StrVal() != "memory" {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	info := fmt.Sprintf(
+		"# Memory\r\nused_memory:%d b %.2f kb %.2f MiB %.2f GB\r\n",
+		m.Alloc,
+		float64(m.Alloc)/1024,
+		float64(m.Alloc)/1024/1024,
+		float64(m.Alloc)/1024/1024/1024,
+	)
+	c.AddReplyStr(info)
 }
 
 func helloCommand(c *GodisClient) {
@@ -240,22 +257,42 @@ func incrCommand(c *GodisClient) {
 func decrCommand(c *GodisClient) {
 	incrDecrCommand(c, false)
 }
+func zaddCommand(c *GodisClient) {
+	zaddGenericCommand(c, c.args[1], c.args[3], 0, false)
+}
 
-func infoCommand(c *GodisClient) {
-	if c.args[1].StrVal() != "memory" {
+func zaddGenericCommand(c *GodisClient, key *Gobj, obj *Gobj, score float64, isIncr bool) {
+	zsetobj := findKeyRead(key)
+	if zsetobj == nil {
+		zsetobj = CreateZSetObject()
+		server.db.data.Set(key, zsetobj)
+	} else if zsetobj.Type_ != GZSET {
 		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
 		return
 	}
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	info := fmt.Sprintf(
-		"# Memory\r\nused_memory:%d b %.2f kb %.2f MiB %.2f GB\r\n",
-		m.Alloc,
-		float64(m.Alloc)/1024,
-		float64(m.Alloc)/1024/1024,
-		float64(m.Alloc)/1024/1024/1024,
-	)
-	c.AddReplyStr(info)
+	zs := zsetobj.Val_.(*zset)
+	if isIncr {
+		/* Read the old score. If the element was not present starts from 0 */
+		de := zs.dict.Find(obj)
+		if de != nil {
+			score += de.Value.Val_.(float64)
+		}
+	}
+	err := zs.dict.Add(obj, nil)
+	if err != nil {
+		c.AddReplyError("error")
+		return
+	}
+	znode := zs.zsl.zslInsert(score, obj)
+	/* Update the score in the dict entry */
+	de := zs.dict.Find(obj)
+	de.Value.Val_ = &(znode.score)
+	server.dirty++
+	if isIncr {
+		c.AddReplyDouble(score)
+	} else {
+		c.AddReplyInt8(1)
+	}
 }
 
 func hdelCommand(c *GodisClient) {
@@ -1019,6 +1056,9 @@ func lookupCommand(cmdStr string) *GodisCommand {
 	}
 	return nil
 }
+func (c *GodisClient) AddReplyDouble(score float64) {
+	c.AddReplyStr(fmt.Sprintf("%.17g", score))
+}
 func (c *GodisClient) AddReplyError(errInfo string) {
 	c.AddReplyStr("-ERR:" + errInfo + CRLF)
 }
@@ -1045,13 +1085,13 @@ func (c *GodisClient) AddReplyStr(str string) {
 	o.DecrRefCount()
 }
 func (c *GodisClient) AddReplyLong(num int64) {
-	c.AddReplyStr(fmt.Sprintf(":%d"+CRLF, num))
+	c.AddReplyStr(fmt.Sprintf("%d"+CRLF, num))
 }
 func (c *GodisClient) AddReplyInt8(num int8) {
-	c.AddReplyStr(fmt.Sprintf(":%d"+CRLF, num))
+	c.AddReplyStr(fmt.Sprintf("%d"+CRLF, num))
 }
 func (c *GodisClient) AddReplyInt(num int) {
-	c.AddReplyStr(fmt.Sprintf(":%d"+CRLF, num))
+	c.AddReplyStr(fmt.Sprintf("%d"+CRLF, num))
 }
 
 func ProcessCommand(c *GodisClient) {
