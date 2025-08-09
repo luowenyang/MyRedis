@@ -92,10 +92,10 @@ func (zsl *zskiplist) zslInsert(score float64, obj *Gobj) *zskiplistNode {
 	 * if the element is already inside or not. */
 	level := zslRandomLevel()
 	if level > zsl.level {
-		for i := 0; i < level; i++ {
-			x.level[i].forward = update[i].level[i].forward
-			update[i].level[i].forward = x
-			/* update span covered by update[i] as x is inserted here */
+		for i := zsl.level; i < level; i++ {
+			rank[i] = 0
+			update[i] = zsl.header
+			update[i].level[i].span = uint32(zsl.length)
 		}
 		zsl.level = level
 	}

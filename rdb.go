@@ -89,8 +89,23 @@ func rdbSaveObject(file *os.File, o *Gobj) (int, error) {
 		}
 		return 0, nil
 	case GZSET:
-		// TODO
-		return 0, nil
+		zsetObj := o.Val_.(zset)
+		// 先保存长度
+		rdbSaveLen(file, uint32(zsetObj.zsl.length))
+		// 保存每个元素
+		zslNode := zsetObj.zsl.header.level[0].forward
+		for zslNode != nil {
+			rdbSaveStringObject(file, zslNode.obj)
+			rdbSaveStringObject(file, &Gobj{
+				Type_:    GSTR,
+				Val_:     strconv.FormatFloat(zslNode.score, 'g', 17, 64),
+				refCount: 1,
+				encoding: GODIS_ENCODING_RAW})
+			dictEntry := zsetObj.dict.Find(zslNode.obj)
+			rdbSaveStringObject(file, dictEntry.Key)
+			rdbSaveStringObject(file, dictEntry.Value)
+			zslNode = zslNode.level[0].forward
+		}
 	case GSET:
 		// o.encoding == GODIS_ENCODING_HT
 		dict := o.Val_.(*Dict)
@@ -127,7 +142,7 @@ func rdbSaveRawString(file *os.File, s string) (int, error) {
 func rdbSaveStringObject(file *os.File, o *Gobj) (int, error) {
 	switch o.encoding {
 	case GODIS_ENCODING_RAW:
-		rdbSaveLen(file, uint32(len(o.Val_.(string))))
+		rdbSaveLen(file, uint32(len(o.Val_.([]byte))))
 		return rdbSaveRawString(file, o.Val_.(string))
 	case GODIS_ENCODING_INT:
 		str := strconv.FormatInt(o.Val_.(int64), 10) // "123456789"
@@ -286,8 +301,23 @@ func rdbLoadObject(type_ Gtype, file *os.File) (*Gobj, error) {
 		}
 		return &Gobj{Type_: GHASH, Val_: hash, encoding: GODIS_ENCODING_HT}, nil
 	case GZSET:
-		// TODO: 实现有序集合的加载
-		return nil, fmt.Errorf("zset type not implemented yet")
+		// 读取zset长度
+		length, err := rdbLoadLen(file)
+		if err != nil {
+			return nil, err
+		}
+		// 创建新的zset对象
+		zseObj := CreateZSetObject()
+		for i := uint64(0); i < length; i++ {
+			zsl_member_key, _ := rdbLoadStringObject(file)
+			zsl_member_score, _ := rdbLoadStringObject(file)
+			dic_member_key, _ := rdbLoadStringObject(file)
+			dic_member_score, _ := rdbLoadStringObject(file)
+			score := zsl_member_score.DoubleVal()
+			zseObj.Val_.(zset).zsl.zslInsert(score, zsl_member_key)
+			zseObj.Val_.(zset).dict.Set(dic_member_key, dic_member_score)
+		}
+		return zseObj, nil
 	default:
 		return nil, fmt.Errorf("unknown type: %d", type_)
 	}

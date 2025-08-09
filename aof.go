@@ -188,7 +188,33 @@ func rewriteAppendOnlyFile(db *GodisDB) int8 {
 				}
 			}
 		} else if value.Type_ == GZSET {
-
+			zsetObj := value.Val_.(zset)
+			zsl := zsetObj.zsl
+			zslNode := zsl.header.level[0].forward
+			items := zsl.length
+			count := int64(0)
+			for zslNode != nil {
+				if count == 0 {
+					cmd_items := int(min(items, AOF_REWRITE_ITEMS_PER_CMD))
+					if fwriteBulkCount(fd, '$', 2+cmd_items) == GODIS_ERR ||
+						fwriteBulkString(fd, "zadd") == GODIS_ERR {
+						log.Printf("Failed writing to the temporary AOF file: %v\n", err)
+						return GODIS_ERR
+					}
+				}
+				member := zslNode.obj
+				fwriteBulkObject(fd, member)
+				fwriteBulkObject(fd, &Gobj{
+					Type_:    GSTR,
+					Val_:     strconv.FormatFloat(zslNode.score, 'g', 17, 64),
+					refCount: 1,
+					encoding: GODIS_ENCODING_RAW})
+				count++
+				items--
+				if count == AOF_REWRITE_ITEMS_PER_CMD {
+					count = 0
+				}
+			}
 		} else {
 			panic(fmt.Sprintf("Unknown type %v for key %v", value.Type_, key.StrVal()))
 		}

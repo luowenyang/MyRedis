@@ -76,6 +76,14 @@ func (o *Gobj) IntVal() int64 {
 	return val
 }
 
+func (o *Gobj) DoubleVal() float64 {
+	if o.Type_ != GSTR {
+		return 0
+	}
+	val, _ := strconv.ParseFloat(o.Val_.(string), 64)
+	return val
+}
+
 func (o *Gobj) IntVal_32() int {
 	if o.Type_ != GSTR {
 		return 0
