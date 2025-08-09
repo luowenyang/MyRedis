@@ -323,6 +323,9 @@ func (dict *Dict) RandomGet() *Entry {
 }
 
 func (dict *Dict) usedSize() int64 {
+	if dict.hts[0] == nil && dict.hts[1] == nil {
+		return 0
+	}
 	var retVal int64
 	if dict.isRehashing() {
 		retVal = dict.hts[0].used + dict.hts[1].used

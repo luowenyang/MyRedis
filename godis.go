@@ -138,9 +138,24 @@ var cmdTable = []GodisCommand{
 
 	//zset
 	{"zadd", zaddCommand, -4, CMD_WRITE},
+	{"zincr", zincrbyCommand, -4, CMD_WRITE},
+	{"zrem", zremCommand, -3, CMD_WRITE},
+	{"zscore", zscoreCommand, 3, CMD_READ},
+	{"zcard", zcardCommand, 2, CMD_READ},
+	{"zrank", zrankCommand, 3, CMD_READ},
+	{"zrevrank", zrevrankCommand, 3, CMD_READ},
+	{"zpopmin", zpopminCommand, -2, CMD_WRITE},
+	{"zpopmax", zpopmaxCommand, -2, CMD_WRITE},
+
+	// TODO LIMIT：分页参数（类似 SQL 的 LIMIT offset, count）。
+	{"zrange", zrangeCommand, -4, CMD_READ},
+	{"zrevrange", zrevrangeCommand, -4, CMD_READ},
+	{"zrangebyscore", zrangebyscoreCommand, -4, CMD_READ},
+	{"zrevrangebyscore", zrevrangebyscoreCommand, -4, CMD_READ},
 
 	{"incr", incrCommand, 2, CMD_WRITE},
 	{"decr", decrCommand, 2, CMD_WRITE},
+	{"keys", keysCommand, 2, CMD_READ},
 
 	//persist
 	{"save", saveCommand, 1, CMD_OTHER},
@@ -158,6 +173,22 @@ var cmdTable = []GodisCommand{
 		redis-benchmark -p 6767 -t set,get,lpush,rpush,del,setnx,setex,rpop,lpop,lrange,lindex,llen,lrem,sadd,srem,sismember,smembers,scard,hset,hsetnx,hkeys,hvals,hget,hdel
 		redis-benchmark -t set,get,lpush,rpush,del,setnx,setex,rpop,lpop,lrange,lindex,llen,lrem,sadd,srem,sismember,smembers,scard,hset,hsetnx,hkeys,hvals,hget,hdel
 	*/
+}
+
+func keysCommand(c *GodisClient) {
+	// TODO 模式匹配,目前就支持输出所有的 key
+	count := server.db.data.usedSize()
+	iter := server.db.data.NewIterator(true) // 内层安全迭代器
+	c.AddReplyArrayLen(count)
+	if count == 0 {
+		return
+	}
+	reply := strings.Builder{}
+	for key, _, exists := iter.Next(); exists; key, _, exists = iter.Next() {
+		val := key.StrVal()
+		reply.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(val), val))
+	}
+	c.AddReplyStr(reply.String())
 }
 
 func pingCommand(c *GodisClient) {
@@ -258,7 +289,388 @@ func decrCommand(c *GodisClient) {
 	incrDecrCommand(c, false)
 }
 func zaddCommand(c *GodisClient) {
-	zaddGenericCommand(c, c.args[1], c.args[3], 0, false)
+	// zaddGenericCommand(c, c.args[1], c.args[3], 0, false)
+	zaddGenericCommand_(c, ZADD_IN_NONE)
+}
+func zincrbyCommand(c *GodisClient) {
+	zaddGenericCommand_(c, ZADD_IN_INCR)
+}
+
+func zpopmaxCommand(c *GodisClient) {
+	zpopGenericCommand(c, true)
+}
+
+func zpopminCommand(c *GodisClient) {
+	zpopGenericCommand(c, false)
+}
+func zpopGenericCommand(c *GodisClient, max bool) {
+	key := c.args[1]
+	zsetObj := lookupKeyWrite(key)
+	if zsetObj == nil {
+		c.AddReplyInt(-1)
+		return
+	} else if zsetObj.Type_ != GZSET {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	count := int64(-1)
+	if len(c.args) > 2 {
+		c.getLongFromObjectOrReply(c.args[2], &count)
+	}
+	if count < 0 {
+		count = 1
+	}
+	zslist := zsetObj.Val_.(zset).zsl
+	pop_len := count
+	for pop_len > 0 {
+		var zslnode *zskiplistNode
+		if max {
+			zslnode = zslist.header.level[0].forward
+		} else {
+			zslnode = zslist.tail
+		}
+		member := zslnode.obj
+		score := zslnode.score
+		zsetObj.Val_.(zset).ZsetDeleteElement(member)
+		// 构建回复
+		var reply strings.Builder
+		if pop_len == count {
+			reply.WriteString(fmt.Sprintf("*%d"+CRLF, count*2))
+		}
+		val := member.StrVal()
+		reply.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(val), val))
+		c.AddReplyStr(reply.String())
+		c.AddReplyDouble(score)
+		pop_len--
+	}
+}
+func zrankGenericCommand(c *GodisClient, reverse bool) {
+	key := c.args[1]
+	zsetObj := findKeyRead(key)
+	if zsetObj == nil {
+		c.AddReplyInt(-1)
+		return
+	} else if zsetObj.Type_ != GZSET {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	member := c.args[2]
+	rank := zsetObj.Val_.(zset).zsetRank(member)
+	if reverse {
+		rank = zsetObj.Val_.(zset).zsl.length - rank
+	}
+	c.AddReplyLong(int64(rank))
+}
+func zrankCommand(c *GodisClient) {
+	zrankGenericCommand(c, false)
+}
+func zrevrankCommand(c *GodisClient) {
+	zrankGenericCommand(c, true)
+}
+func zremCommand(c *GodisClient) {
+	key := c.args[1]
+	zsetObj := lookupKeyWrite(key)
+	deleted := 0
+	for i := 2; i < len(c.args); i++ {
+		member := c.args[i]
+		zset_ := zsetObj.Val_.(zset)
+		if zset_.zsl.length == 0 {
+			server.db.data.Delete(key)
+			c.AddReplyInt(deleted)
+			return
+		}
+		zsetObj.Val_.(zset).ZsetDeleteElement(member)
+		deleted++
+	}
+	c.AddReplyInt(deleted)
+}
+
+func zrevrangebyscoreCommand(c *GodisClient) {
+	zrangebyscoreGenericCommand(c, true)
+}
+
+func zrangebyscoreCommand(c *GodisClient) {
+	zrangebyscoreGenericCommand(c, false)
+}
+
+func zrangebyscoreGenericCommand(c *GodisClient, reverse bool) {
+	key := c.args[1]
+	start, _ := strconv.ParseFloat(c.args[2].StrVal(), 64)
+	end, _ := strconv.ParseFloat(c.args[3].StrVal(), 64)
+	withscores := false
+	argc := len(c.args)
+	// TODO limi
+	if argc == 5 && c.args[4].StrVal() == "withscores" {
+		withscores = true
+	} else if argc > 5 {
+		c.AddReplyError("ERR syntax error")
+		return
+	}
+	zsetObj := findKeyRead(key)
+	if zsetObj == nil {
+		c.AddReplyArrayLen(0)
+		return
+	} else if zsetObj.Type_ != GZSET {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+
+	range_len := int64(0)
+	reply := strings.Builder{}
+	zslNode := zsetObj.Val_.(zset).zsl.zslGetElementScore(start)
+	for zslNode != nil && zslNode.score <= end {
+		range_len++
+		member := zslNode.obj
+		str := member.StrVal()
+		reply.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(str), str))
+		if withscores {
+			reply.WriteString(fmt.Sprintf("$%d\r\n%f\r\n", len(str), zslNode.score))
+		}
+		zslNode = zslNode.level[0].forward
+	}
+	c.AddReplyArrayLen(range_len)
+	if range_len > 0 {
+		c.AddReplyStr(reply.String())
+	}
+}
+
+func zrevrangeCommand(c *GodisClient) {
+	zrangeGenericCommand(c, true)
+}
+
+func zrangeCommand(c *GodisClient) {
+	zrangeGenericCommand(c, false)
+}
+
+func zrangeGenericCommand(c *GodisClient, reverse bool) {
+	key := c.args[1]
+	var start, end int64
+	c.getLongFromObjectOrReply(c.args[2], &start)
+	c.getLongFromObjectOrReply(c.args[3], &end)
+	withscores := false
+	argc := len(c.args)
+	if argc == 5 && c.args[4].StrVal() == "withscores" {
+		withscores = true
+	} else if argc > 5 {
+		c.AddReplyError("ERR syntax error")
+		return
+	}
+
+	zsetObj := findKeyRead(key)
+	if zsetObj == nil {
+		c.AddReplyArrayLen(0)
+		return
+	} else if zsetObj.Type_ != GZSET {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+
+	zslen := zsetObj.Val_.(zset).zsl.length
+	if start < 0 {
+		start = int64(zslen) + start
+	}
+	if end < 0 {
+		end = int64(zslen) + end
+	}
+	if start < 0 {
+		start = 0
+	}
+
+	if start > int64(zslen)-1 {
+		c.AddReplyArrayLen(0)
+		return
+	}
+	if end > int64(zslen)-1 {
+		end = int64(zslen) - 1
+	}
+	var zslNode *zskiplistNode
+	if reverse {
+		if start == 0 {
+			zslNode = zsetObj.Val_.(zset).zsl.tail
+		} else {
+			zslNode = zsetObj.Val_.(zset).zsl.zslGetElementByRank(int64(zslen) - start)
+		}
+	} else {
+		if start == 0 {
+			zslNode = zsetObj.Val_.(zset).zsl.header.level[0].forward
+		} else {
+			zslNode = zsetObj.Val_.(zset).zsl.zslGetElementByRank(start + 1)
+		}
+	}
+	c.AddReplyArrayLen(end - start + 1)
+	for i := start; i <= end; i++ {
+		member := zslNode.obj
+		c.AddReplyBulk(member)
+		if withscores {
+			c.AddReplyDouble(zslNode.score)
+		}
+		zslNode = zslNode.level[0].forward
+	}
+}
+
+func zscoreCommand(c *GodisClient) {
+	key := c.args[1]
+	zsetObj := findKeyRead(key)
+	if zsetObj == nil {
+		c.AddReplyInt(-1)
+		return
+	} else if zsetObj.Type_ != GZSET {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	resultScore := zsetObj.Val_.(zset).dict.Find(c.args[2]).Value.Val_.(float64)
+	c.AddReplyDouble(resultScore)
+}
+
+func zcardCommand(c *GodisClient) {
+	key := c.args[1]
+	zsetObj := findKeyRead(key)
+	if zsetObj == nil {
+		c.AddReplyInt(0)
+		return
+	} else if zsetObj.Type_ != GZSET {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+	length := zsetObj.Val_.(zset).zsl.length
+	c.AddReplyLong(int64(length))
+}
+
+const (
+	ZADD_IN_NONE = 0      // 无特殊标志
+	ZADD_IN_INCR = 1 << 0 // 增加分数而不是设置它
+	ZADD_IN_NX   = 1 << 1 // 不修改已存在的元素
+	ZADD_IN_XX   = 1 << 2 // 只修改已存在的元素
+	ZADD_IN_GT   = 1 << 3 // 仅在新分数更高时更新
+	ZADD_IN_LT   = 1 << 4 // 仅在新分数更低时更新
+)
+
+func zaddGenericCommand_(c *GodisClient, flag int) {
+	key := c.args[1]
+	scoreIdx := 2
+	ch := 0
+	for scoreIdx < len(c.args) {
+		opt := c.args[scoreIdx].Val_.(string)
+		if opt == "NX" || opt == "nx" {
+			flag |= ZADD_IN_NX
+		} else if opt == "XX" || opt == "xx" {
+			flag |= ZADD_IN_XX
+		} else if opt == "GT" || opt == "gt" {
+			flag |= ZADD_IN_GT
+		} else if opt == "LT" || opt == "lt" {
+			flag |= ZADD_IN_LT
+		} else if opt == "CH" || opt == "ch" {
+			ch = 1
+		} else if opt == "INCR" || opt == "incr" {
+			flag |= ZADD_IN_INCR
+		} else {
+			break
+		}
+		scoreIdx++
+	}
+
+	// 将标志位转换为易于检查的布尔变量
+	incr := (flag & ZADD_IN_INCR) != 0
+	nx := (flag & ZADD_IN_NX) != 0
+	xx := (flag & ZADD_IN_XX) != 0
+	gt := (flag & ZADD_IN_GT) != 0
+	lt := (flag & ZADD_IN_LT) != 0
+
+	// 解析选项后，参数数量应为偶数，
+	// 因为之后应该是成对的分数和成员值
+
+	elements := len(c.args) - scoreIdx
+	if elements%2 != 0 || elements == 0 {
+		c.AddReplyError("ZADD: wrong number of arguments")
+		return
+	}
+	elements /= 2 // 当前变量存储的是 分数-成员 对的数量
+
+	if nx && xx {
+		c.AddReplyError("XX and NX options at the same time are not compatible")
+		return
+	}
+
+	if (gt && nx) || (lt && nx) || (gt && lt) {
+		c.AddReplyError("GT, LT, and/or NX options at the same time are not compatible")
+		return
+	}
+	// 注意：XX（仅更新已存在成员）标志可以与 GT（仅更高分数时更新）或 LT（仅更低分数时更新）标志组合使用
+
+	if incr && elements > 1 {
+		c.AddReplyError("INCR option supports a single increment-element pair")
+		return
+	}
+
+	// 开始解析所有分数值，必须在操作有序集合前处理所有语法错误
+	// 以保证命令的原子性：要么全部执行，要么完全不执行
+	scores := make([]float64, elements)
+	for i := 0; i < elements; i++ {
+		// 获取分数值
+		score, err := Str2Double(c.args[i*2+scoreIdx].StrVal())
+		if err != nil {
+			c.AddReplyError("ERR value is not a valid float")
+			return
+		}
+		// 添加分数值
+		scores[i] = score
+	}
+	// 查询键对应的有序集合，若不存在则新建
+	zsetobj := findKeyRead(key)
+	if zsetobj == nil {
+		if xx {
+			c.AddReplyStr("0") // 键不存在且设置了XX选项：无需任何操作
+			return
+		}
+		zsetobj = CreateZSetObject()
+		server.db.data.Set(key, zsetobj)
+	} else if zsetobj.Type_ != GZSET {
+		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
+		return
+	}
+
+	added := int64(0)
+	updated := int64(0)
+	processed := int64(0)
+	var score float64
+	for i := 0; i < elements; i++ {
+		score = scores[i]
+		ele := c.args[scoreIdx+1+i*2]
+		retflags, newscore, err := zsetobj.Val_.(zset).zsetAdd(zsetobj, score, ele, flag)
+		if err != nil {
+			return
+		}
+		if retflags&ZADD_OUT_ADDED != 0 {
+			added++
+		}
+		if retflags&ZADD_OUT_UPDATED != 0 {
+			updated++
+		}
+		if retflags&ZADD_OUT_NAN == 0 {
+			processed++
+		}
+		score = newscore
+	}
+	server.dirty += (added + updated)
+
+	if incr { // ZINCRBY or INCR option.
+		if processed > 0 {
+			c.AddReplyDouble(score)
+		} else {
+			c.AddReplyStr("0")
+		}
+	} else { // zadd
+		if ch == 1 {
+			c.AddReplyLong(added + updated)
+		} else {
+			c.AddReplyLong(added)
+		}
+	}
+
+}
+
+func Str2Double(str string) (float64, error) {
+	return strconv.ParseFloat(str, 64)
 }
 
 func zaddGenericCommand(c *GodisClient, key *Gobj, obj *Gobj, score float64, isIncr bool) {
@@ -270,7 +682,7 @@ func zaddGenericCommand(c *GodisClient, key *Gobj, obj *Gobj, score float64, isI
 		c.AddReplyError("WRONGTYPE Operation against a key holding the wrong kind of value")
 		return
 	}
-	zs := zsetobj.Val_.(*zset)
+	zs := zsetobj.Val_.(zset)
 	if isIncr {
 		/* Read the old score. If the element was not present starts from 0 */
 		de := zs.dict.Find(obj)
@@ -286,7 +698,9 @@ func zaddGenericCommand(c *GodisClient, key *Gobj, obj *Gobj, score float64, isI
 	znode := zs.zsl.zslInsert(score, obj)
 	/* Update the score in the dict entry */
 	de := zs.dict.Find(obj)
-	de.Value.Val_ = &(znode.score)
+	de.Value = &Gobj{
+		Type_: GSTR,
+		Val_:  znode.score}
 	server.dirty++
 	if isIncr {
 		c.AddReplyDouble(score)
@@ -683,7 +1097,7 @@ func lrangeCommand(c *GodisClient) {
 	lobj := findKeyRead(key)
 	if lobj == nil {
 		// 返回空数组
-		c.AddReplyStr("*0\r\n")
+		c.AddReplyArrayLen(0)
 		return
 	}
 
@@ -718,7 +1132,7 @@ func lrangeCommand(c *GodisClient) {
 
 	// 确保索引在有效范围内
 	if start >= listLen || start < 0 {
-		c.AddReplyStr("*0" + CRLF)
+		c.AddReplyArrayLen(0)
 		return
 	}
 	if stop >= listLen {
@@ -727,7 +1141,7 @@ func lrangeCommand(c *GodisClient) {
 
 	// 如果起始位置大于结束位置，返回空数组
 	if start > stop {
-		c.AddReplyStr("*0" + CRLF)
+		c.AddReplyArrayLen(0)
 		return
 	}
 
@@ -1057,7 +1471,8 @@ func lookupCommand(cmdStr string) *GodisCommand {
 	return nil
 }
 func (c *GodisClient) AddReplyDouble(score float64) {
-	c.AddReplyStr(fmt.Sprintf("%.17g", score))
+	replyStr := fmt.Sprintf("%.17g", score)
+	c.AddReplyStr(fmt.Sprintf("$%v\r\n%v"+CRLF, len(replyStr), replyStr))
 }
 func (c *GodisClient) AddReplyError(errInfo string) {
 	c.AddReplyStr("-ERR:" + errInfo + CRLF)
@@ -1072,11 +1487,12 @@ func (c *GodisClient) AddReply(o *Gobj) {
 	server.aeLoop.AddFileEvent(c.fd, AE_WRITABLE, SendReplyToClient, c)
 }
 func (c *GodisClient) AddReplyBulkLen(o *Gobj) {
-
+	c.AddReplyStr(fmt.Sprintf("$%v\r\n", len(o.StrVal())))
 }
 
 func (c *GodisClient) AddReplyBulk(o *Gobj) {
-	c.AddReply(o)
+	c.AddReplyBulkLen(o)
+	c.AddReplyStr(o.StrVal() + CRLF)
 }
 
 func (c *GodisClient) AddReplyStr(str string) {
@@ -1085,13 +1501,16 @@ func (c *GodisClient) AddReplyStr(str string) {
 	o.DecrRefCount()
 }
 func (c *GodisClient) AddReplyLong(num int64) {
-	c.AddReplyStr(fmt.Sprintf("%d"+CRLF, num))
+	c.AddReplyStr(fmt.Sprintf(":%d"+CRLF, num))
 }
 func (c *GodisClient) AddReplyInt8(num int8) {
-	c.AddReplyStr(fmt.Sprintf("%d"+CRLF, num))
+	c.AddReplyStr(fmt.Sprintf(":%d"+CRLF, num))
 }
 func (c *GodisClient) AddReplyInt(num int) {
-	c.AddReplyStr(fmt.Sprintf("%d"+CRLF, num))
+	c.AddReplyStr(fmt.Sprintf(":%d"+CRLF, num))
+}
+func (c *GodisClient) AddReplyArrayLen(len_ int64) {
+	c.AddReplyStr(fmt.Sprintf("*%d"+CRLF, len_))
 }
 
 func ProcessCommand(c *GodisClient) {
@@ -1426,7 +1845,7 @@ func main() {
 	// 加载AOF 文件
 	//loadAppendOnlyFile()
 	// 加载 RDB 数据库
-	rdbLoad(server.dbfilename)
+	//rdbLoad(server.dbfilename)
 	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
 	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil)
 	log.Println("godis server is up.")

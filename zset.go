@@ -1,6 +1,9 @@
 package main
 
-import "math/rand"
+import (
+	"errors"
+	"math/rand"
+)
 
 /*
 <----- backward			forward	------->
@@ -42,6 +45,9 @@ func zslCreate() *zskiplist {
 	zsl.header.backward = nil
 	return &zsl
 }
+
+// TODO zslDelete()
+
 func zslCreateNode(level int, score float64, obj *Gobj) *zskiplistNode {
 	return &zskiplistNode{
 		level: make([]zskiplistLevel, level),
@@ -121,4 +127,196 @@ func (zsl *zskiplist) zslInsert(score float64, obj *Gobj) *zskiplistNode {
 	zsl.length++
 	obj.IncrRefCount()
 	return x
+}
+
+func (zsl *zskiplist) zslUpdateScore(ele *Gobj, curscore float64, newscore float64) *zskiplistNode {
+	update := make([]*zskiplistNode, ZSKIPLIST_MAXLEVEL)
+	x := zsl.header
+	/* We need to seek to element to update to start: this is useful anyway,
+	 * we'll have to update or remove it. */
+	for i := zsl.level - 1; i >= 0; i-- {
+		for x.level[i].forward != nil &&
+			(x.level[i].forward.score < curscore ||
+				x.level[i].forward.score == curscore && !GStrEqual(x.level[i].forward.obj, ele)) {
+			x = x.level[i].forward
+		}
+		update[i] = x
+	}
+	/* Jump to our element: note that this function assumes that the
+	 * element with the matching score exists. */
+	x = x.level[0].forward
+	/* If the node, after the score update, would be still exactly
+	 * at the same position, we can just update the score without
+	 * actually removing and re-inserting the element in the skiplist. */
+	if (x.backward == nil || x.backward.score < newscore) &&
+		(x.level[0].forward == nil || x.level[0].forward.score > newscore) {
+		x.score = newscore
+		return x
+	}
+	/* No way to reuse the old node: we need to remove and insert a new
+	* one at a different place. */
+	zsl.zslDeleteNode(x, update)
+	newnode := zsl.zslInsert(newscore, x.obj)
+	x.obj = nil
+	return newnode
+}
+
+/*
+跳表的删除操作需要解决一个核心问题：
+删除一个节点后，必须更新所有指向该节点的指针（从最底层到该节点的最高层）。
+update 数组的作用是 预先记录待删除节点在每一层的前驱节点，从而避免重复遍历跳表。
+
+ update 数组的功能
+存储每一层的前驱节点：
+update[i] 表示在第 i 层中，待删除节点 x 的前一个节点（即需要修改指针的节点）。
+
+指针更新的桥梁：
+删除节点时，直接将 update[i]->level[i].forward 指向 x->level[i].forward，跳过待删除的 x。
+
+*/
+
+func (zsl *zskiplist) zslDeleteNode(x *zskiplistNode, update []*zskiplistNode) {
+	for i := 0; i < zsl.level; i++ {
+		if update[i].level[i].forward == x {
+			update[i].level[i].forward = x.level[i].forward
+			update[i].level[i].span += x.level[i].span - 1
+		} else {
+			update[i].level[i].span -= 1
+		}
+	}
+	if x.level[0].forward != nil {
+		x.level[0].forward.backward = x.backward
+	} else {
+		zsl.tail = x.backward
+	}
+	for zsl.level > 1 && zsl.header.level[zsl.level-1].forward == nil {
+		zsl.level--
+	}
+	zsl.length--
+}
+
+func (zsl *zskiplist) zslGetElementByRank(rank int64) *zskiplistNode {
+	x := zsl.header
+	traversed := int64(0)
+	for i := zsl.level - 1; i >= 0; i-- {
+		for x.level[i].forward != nil && (traversed+int64(x.level[i].span)) < rank {
+			traversed += int64(x.level[i].span)
+			x = x.level[i].forward
+		}
+		if traversed == rank {
+			return x
+		}
+	}
+	return nil
+}
+
+func (zsl *zskiplist) zslGetElementScore(start_score float64) *zskiplistNode {
+	x := zsl.header
+	for i := zsl.level - 1; i >= 0; i-- {
+		for x.level[i].forward != nil && x.score < start_score {
+			x = x.level[i].forward
+		}
+	}
+	return x.level[0].forward
+}
+
+func (zset_ zset) zsetFindElement(ele *Gobj) (*zskiplistNode, []*zskiplistNode, uint64) {
+	// 遍历跳表
+	update := make([]*zskiplistNode, ZSKIPLIST_MAXLEVEL)
+	x := zset_.zsl.header
+	curscore := zset_.dict.Find(ele).Value.Val_.(float64)
+	rank := uint64(0)
+	/* We need to seek to element to update to start: this is useful anyway,
+	 * we'll have to update or remove it. */
+	for i := zset_.zsl.level - 1; i >= 0; i-- {
+		for x.level[i].forward != nil &&
+			(x.level[i].forward.score < curscore ||
+				x.level[i].forward.score == curscore && !GStrEqual(x.level[i].forward.obj, ele)) {
+			x = x.level[i].forward
+			rank += uint64(x.level[i].span)
+		}
+		update[i] = x
+	}
+	x = x.level[0].forward
+	return x, update, rank
+}
+
+func (zset_ zset) ZsetDeleteElement(ele *Gobj) {
+	zset_.zsl.zslDelete(&zset_, ele)
+	zset_.dict.Delete(ele)
+	if zset_.zsl.length == 0 {
+		//server.db.data.Delete(zset_.dict.)
+	}
+}
+
+func (zsl *zskiplist) zslDelete(zset_ *zset, obj *Gobj) {
+	removedEle, update, _ := zset_.zsetFindElement(obj)
+	zsl.zslDeleteNode(removedEle, update)
+}
+
+func (zset_ zset) zsetRank(member *Gobj) uint64 {
+	dictEntry := zset_.dict.Find(member)
+	if dictEntry == nil {
+		return uint64(0)
+	}
+	_, _, rank := zset_.zsetFindElement(member)
+	return rank
+}
+
+const (
+	// ZADD 命令输出标志位
+	ZADD_OUT_NOP     = 1 << iota // 由于条件限制未执行操作
+	ZADD_OUT_NAN                 // 分数值为 NaN (非数字)
+	ZADD_OUT_ADDED               // 元素是新的且已添加
+	ZADD_OUT_UPDATED             // 元素已存在，分数已更新
+)
+
+func (zset_ zset) zsetAdd(zsetObjct *Gobj, score float64, ele *Gobj, flag int) (int, float64, error) {
+	out_flag := 0
+	incr := (flag & ZADD_IN_INCR) != 0
+	nx := (flag & ZADD_IN_NX) != 0
+	xx := (flag & ZADD_IN_XX) != 0
+	gt := (flag & ZADD_IN_GT) != 0
+	lt := (flag & ZADD_IN_LT) != 0
+
+	var curScore float64
+	if zsetObjct.encoding != GODIS_ENCODING_SKIPLIST {
+		return 0, 0, errors.New("Wrong encoding")
+	}
+	zs := zsetObjct.Val_.(zset)
+	dicEntry := zs.dict.Find(ele)
+	if dicEntry != nil {
+		/* NX? Return, same element already exists. */
+		if nx {
+			out_flag |= ZADD_OUT_NOP
+			return out_flag, curScore, nil
+		}
+		curScore = dicEntry.Value.Val_.(float64)
+
+		if incr {
+			score += curScore
+		}
+
+		// GT/LT? Only update if score is greater/less than current.
+		if lt && score <= curScore || gt && score >= curScore {
+			out_flag |= ZADD_OUT_NOP
+			return out_flag, curScore, nil
+		}
+
+		// Remove and re-insert when score changes.
+		if score != curScore {
+			updateZslNode := zs.zsl.zslUpdateScore(ele, curScore, score)
+			zs.dict.Set(ele, &Gobj{Type_: GSTR, Val_: updateZslNode.score, encoding: GODIS_ENCODING_RAW})
+			out_flag |= ZADD_OUT_UPDATED
+		}
+		return out_flag, score, nil
+	} else if !xx {
+		zslNode := zset_.zsl.zslInsert(score, ele)
+		zset_.dict.Set(ele, &Gobj{Type_: GSTR, Val_: zslNode.score, encoding: GODIS_ENCODING_RAW})
+		out_flag |= ZADD_OUT_ADDED
+		return out_flag, score, nil
+	} else {
+		out_flag |= ZADD_OUT_NOP
+		return out_flag, curScore, nil
+	}
 }
