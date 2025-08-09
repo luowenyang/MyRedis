@@ -142,8 +142,15 @@ func rdbSaveRawString(file *os.File, s string) (int, error) {
 func rdbSaveStringObject(file *os.File, o *Gobj) (int, error) {
 	switch o.encoding {
 	case GODIS_ENCODING_RAW:
-		rdbSaveLen(file, uint32(len(o.Val_.([]byte))))
-		return rdbSaveRawString(file, o.Val_.(string))
+		switch val := o.Val_.(type) {
+		case float64:
+			rdbSaveLen(file, 8)
+			floatBytes := []byte(fmt.Sprintf("%f", val))
+			return rdbWriteRaw(file, floatBytes)
+		default:
+			rdbSaveLen(file, uint32(len(val.(string))))
+			return rdbSaveRawString(file, val.(string))
+		}
 	case GODIS_ENCODING_INT:
 		str := strconv.FormatInt(o.Val_.(int64), 10) // "123456789"
 		rdbSaveLen(file, uint32(len(str)))

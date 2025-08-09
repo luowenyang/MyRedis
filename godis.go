@@ -1845,7 +1845,7 @@ func main() {
 	// 加载AOF 文件
 	//loadAppendOnlyFile()
 	// 加载 RDB 数据库
-	//rdbLoad(server.dbfilename)
+	rdbLoad(server.dbfilename)
 	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
 	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil)
 	log.Println("godis server is up.")
