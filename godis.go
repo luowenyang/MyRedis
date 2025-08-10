@@ -1268,7 +1268,10 @@ func lookupKey(key *Gobj) *Gobj {
 }
 
 func lookupKeyWrite(key *Gobj) *Gobj {
-	expireIfNeeded(key)
+	if expireIfNeeded(key) {
+		// 如果过期了，直接删除了，不需要再去查了
+		return nil
+	}
 	return lookupKey(key)
 }
 
@@ -1396,21 +1399,25 @@ func setnxCommand(c *GodisClient) {
 	c.AddReplyStr(":1\r\n")
 }
 
-func expireIfNeeded(key *Gobj) {
+func expireIfNeeded(key *Gobj) bool {
 	entry := server.db.expire.Find(key)
 	if entry == nil {
-		return
+		return false
 	}
-	when := entry.Value.IntVal()
+	when := entry.Value.Val_.(int64)
 	if when > GetMsTime() {
-		return
+		return false
 	}
 	server.db.expire.Delete(key)
 	server.db.data.Delete(key)
+	return true
 }
 
 func findKeyRead(key *Gobj) *Gobj {
-	expireIfNeeded(key)
+	if expireIfNeeded(key) {
+		// 如果过期了，直接删除了，不需要再去查了
+		return nil
+	}
 	return server.db.data.Get(key)
 }
 
@@ -1804,7 +1811,7 @@ func AcceptHandler(loop *AeLoop, fd int, extra interface{}) {
 const EXPIRE_CHECK_COUNT int = 100
 
 // background job, runs every 100ms
-// 随机过期删除策略 每 100ms执行一次
+// 随机过期删除策略 每 100ms执行一次 每次选 100个key
 // 惰性删除策略，访问的时候检查
 func ServerCron(loop *AeLoop, id int, extra interface{}) {
 	for i := 0; i < EXPIRE_CHECK_COUNT; i++ {
@@ -1812,7 +1819,7 @@ func ServerCron(loop *AeLoop, id int, extra interface{}) {
 		if entry == nil {
 			break
 		}
-		if entry.Value.IntVal() < time.Now().Unix() {
+		if entry.Value.Val_.(int64) < time.Now().Unix() {
 			server.db.data.Delete(entry.Key)
 			server.db.expire.Delete(entry.Key)
 		}
