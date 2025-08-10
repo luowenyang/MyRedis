@@ -1552,10 +1552,6 @@ func ProcessCommand(c *GodisClient) {
 		// FeedAppendOnlyFile(cmd, c.args)
 	}
 	resetClient(c)
-	// 处理完命令后，主动尝试发送回复
-	if c.reply.Length() > 0 {
-		SendReplyToClient(server.aeLoop, c.fd, c)
-	}
 }
 
 func freeArgs(client *GodisClient) {
