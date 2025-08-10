@@ -1449,6 +1449,10 @@ func setCommand(c *GodisClient) {
 
 func expireCommand(c *GodisClient) {
 	key := c.args[1]
+	if lookupKeyWrite(key) == nil {
+		c.AddReplyInt8(0)
+		return
+	}
 	val := c.args[2]
 	if val.Type_ != GSTR {
 		//TODO: extract shared.strings
@@ -1458,7 +1462,7 @@ func expireCommand(c *GodisClient) {
 	expObj := CreateFromInt(expire)
 	server.db.expire.Set(key, expObj)
 	expObj.DecrRefCount()
-	c.AddReplyStr("+OK" + CRLF)
+	c.AddReplyInt8(1)
 }
 
 func lookupCommand(cmdStr string) *GodisCommand {
@@ -1800,6 +1804,8 @@ func AcceptHandler(loop *AeLoop, fd int, extra interface{}) {
 const EXPIRE_CHECK_COUNT int = 100
 
 // background job, runs every 100ms
+// 随机过期删除策略 每 100ms执行一次
+// 惰性删除策略，访问的时候检查
 func ServerCron(loop *AeLoop, id int, extra interface{}) {
 	for i := 0; i < EXPIRE_CHECK_COUNT; i++ {
 		entry := server.db.expire.RandomGet()
@@ -1845,7 +1851,7 @@ func main() {
 	// 加载AOF 文件
 	//loadAppendOnlyFile()
 	// 加载 RDB 数据库
-	rdbLoad(server.dbfilename)
+	//rdbLoad(server.dbfilename)
 	server.aeLoop.AddFileEvent(server.fd, AE_READABLE, AcceptHandler, nil)
 	server.aeLoop.AddTimeEvent(AE_NORMAL, 100, ServerCron, nil)
 	log.Println("godis server is up.")
